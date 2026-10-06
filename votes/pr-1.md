@@ -8,7 +8,7 @@
 
 | Member | Position | Date |
 |---|---|---|
-| Anchit Som | — | |
+| Anchit Som | preference | 2026-10-06 |
 | Clara Yeo | — | |
 | Disha Shanbhag | — | |
 | Fernanda Munhoz | — | |
