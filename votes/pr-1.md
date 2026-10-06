@@ -21,13 +21,24 @@
 | Rhianwen Rowlands | — | |
 | Tess Buckley | — | |
 | William Wong | — | |
-| Yiannis Ravanis | preference | 2026-10-06 |
+| Yiannis Ravanis | objection | 2026-10-06 |
 
 **Positions:** `preference` · `toleration` · `abstention` · `objection` · `—` not answered.
 
 ## Result
 
 ## Objections
+
+<!-- objection: 25332209 -->
+**Yiannis Ravanis** — 2026-10-06
+
+> Reason: | Anchit Som | preference | 2026-10-06 |
+> ## Result
+> **Carried.**
+> Affirmative 14 of 14, needed 8.
+> 
+> Route forward: Make it fortnightly.
+
 
 ## Notes
 
