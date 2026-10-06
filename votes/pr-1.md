@@ -21,7 +21,7 @@
 | Rhianwen Rowlands | — | |
 | Tess Buckley | — | |
 | William Wong | — | |
-| Yiannis Ravanis | — | |
+| Yiannis Ravanis | preference | 2026-10-06 |
 
 **Positions:** `preference` · `toleration` · `abstention` · `objection` · `—` not answered.
 
@@ -32,4 +32,3 @@
 ## Notes
 
 ## Earlier rounds
-
