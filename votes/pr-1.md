@@ -21,7 +21,7 @@
 | Rhianwen Rowlands | — | |
 | Tess Buckley | — | |
 | William Wong | — | |
-| Yiannis Ravanis | objection | 2026-10-06 |
+| Yiannis Ravanis | preference | 2026-10-06 |
 
 **Positions:** `preference` · `toleration` · `abstention` · `objection` · `—` not answered.
 
