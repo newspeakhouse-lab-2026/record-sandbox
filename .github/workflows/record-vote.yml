@@ -401,6 +401,9 @@ jobs:
                   `\`.github/instrument-templates/vote.md\`.`, branch, n);
               }
 
+              core.notice('sandbox: sleeping 14s between read and write');
+              await new Promise(r => setTimeout(r, 14000));
+
               // Checked against these bytes on every attempt, not once before the
               // loop: between attempts the window may have closed or the vote restarted.
               const clean = got.text.replace(/<!--[\s\S]*?-->/g, '');
