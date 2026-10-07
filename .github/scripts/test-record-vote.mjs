@@ -35,7 +35,7 @@ const has = (s, sub) => typeof s === 'string' && s.includes(sub);
 const labelsIn = file => [...readFileSync(join(HERE, '..', 'ISSUE_TEMPLATE', file), 'utf8')
   .matchAll(/^\s*label:\s*(.+)$/gm)].map(x => x[1].trim().replace(/^["']|["']$/g, ''));
 const declared = [...SCRIPT.matchAll(/^\s{2}\w+:\s*'([^']+)',$/gm)].map(x => x[1]);
-for (const file of ['vote.yml', 'objection.yml']) {
+for (const file of ['vote.yml']) {
   for (const label of labelsIn(file)) {
     check(`${file} field "${label}" is known to the workflow`, declared.includes(label), true);
   }
@@ -65,7 +65,45 @@ const voteFile = (rows = { Ada: '—', Blaise: '—', Carl: '—' }, closes = '2
   '## Result', '', '## Objections', '',
 ].join('\n');
 
+/* Tier A and Tier B hold no vote (§2): no table, no roll, no threshold, no
+   window. The file exists only because somebody objected. */
+const noVoteFile = (blocks = '', closes = '2099-01-01T12:00:00+00:00') => [
+  '# Objections — PR #14: a proposal', '',
+  '**Procedure:** Tier A',
+  '**Carries if:** no member objects before it closes',
+  '**Opened:** Sunday 31 May 2026, 10:00 UK (`2026-05-31T10:00:00+01:00`)',
+  `**Closes:** Friday 1 January 2099, 12:00 UK (\`${closes}\`)`, '',
+  'Section 2 passes a Tier A proposal absent a stated objection, so no vote is',
+  'held and this file has no table.', '',
+  '## Objections', '', blocks,
+].join('\n');
+
+/* The window at Tier A and Tier B is computed from the proposal's own labels —
+   opened: plus the period §2 gives the tier — so a fixture without them is a
+   proposal whose period nothing records. The issue is submitted 2026-06-01, so
+   opening on 05-31 leaves a 2-day Tier A window open. */
+const TIER = (tier, extra = ['opened:2026-05-31T10:00:00Z']) =>
+  ({ state: 'open', draft: false,
+     labels: [{ name: `tier-${tier}` }, ...extra.map(name => ({ name }))],
+     head: { ref: 'feature', repo: { full_name: 'o/r' } }, html_url: 'PRURL' });
+
+const DATA_JSON = JSON.stringify({ procedures: { 'tier-a': { days: 2 } } });
+
 const b64 = s => Buffer.from(s, 'utf8').toString('base64');
+
+/* Octokit puts the HTTP status on the error it throws, and the workflow now
+   branches on it: only a 404 is a fact about the Record. A stub that throws a
+   bare Error carries no status, so it would exercise the fault branch while the
+   test believed it was exercising the refusal — which is how a stub comes to
+   assert the opposite of what it names. */
+const err = status => Object.assign(new Error(`HTTP ${status}`), { status });
+
+/* An objection on the single form: the position dropdown says objection, and the
+   two boxes Section 2 requires are filled in or not. */
+const OBJ = (reason, route) =>
+  '### Pull request number\n\n14\n\n### Your position\n\nobjection — I object. Fill in BOTH boxes below; Section 2 requires them\n'
+  + `\n### Your reason — required if you are objecting\n\n${reason}\n`
+  + `\n### A suggested route forward — required if you are objecting\n\n${route}\n`;
 
 async function run({
   user = { id: 111, login: 'ada' },
@@ -74,12 +112,15 @@ async function run({
   body = '### Pull request number\n\n14\n\n### Your position\n\npreference — I support this outcome. THE ONLY ANSWER THAT COUNTS AS A YES\n',
   file = voteFile(),
   fileMissing = false,
+  fileStatus = 404,         // what GitHub answered: 404 is "no vote", anything else is a fault
+  pullStatus = 404,
   pull = { state: 'open', draft: false, head: { ref: 'feature', repo: { full_name: 'o/r' } }, html_url: 'PRURL' },
   pullMissing = false,
+  dataJson = DATA_JSON,     // holds the period §2 gives Tier A
   putFails = [],            // statuses to throw before succeeding
   fileAfterConflict = null, // what another voter left behind
 } = {}) {
-  const comments = [], added = [], warnings = [], writes = [];
+  const comments = [], added = [], warnings = [], writes = [], labelled = [];
   let current = file, puts = 0;
   const context = {
     payload: {
@@ -91,14 +132,18 @@ async function run({
   const github = { rest: {
     issues: {
       createComment: async ({ body }) => comments.push(body),
-      addLabels: async ({ labels }) => added.push(...labels),
+      addLabels: async ({ issue_number, labels }) => {
+        added.push(...labels);
+        for (const l of labels) labelled.push(`${l}@${issue_number}`);
+      },
       update: async () => {},
     },
-    pulls: { get: async () => { if (pullMissing) throw new Error('404'); return { data: pull }; } },
+    pulls: { get: async () => { if (pullMissing) throw err(pullStatus); return { data: pull }; } },
     repos: {
       getContent: async ({ path }) => {
         if (path === 'members.md') return { data: { content: b64(MEMBERS) } };
-        if (fileMissing) throw new Error('404');
+        if (path === 'docs/data.json') return { data: { content: b64(dataJson) } };
+        if (fileMissing) throw err(fileStatus);
         return { data: { content: b64(current), sha: 'sha' + puts } };
       },
       createOrUpdateFileContents: async (args) => {
@@ -115,7 +160,7 @@ async function run({
   } };
   const core = { notice: () => {}, setFailed: m => warnings.push(m) };
   await new Function('github', 'context', 'core', 'return (async()=>{' + SCRIPT + '})()')(github, context, core);
-  return { comments, added, failed: warnings, writes, puts };
+  return { comments, added, failed: warnings, writes, puts, labelled };
 }
 
 /* ---- the paths ----------------------------------------------------------- */
@@ -154,9 +199,34 @@ check('and names when it closed', has(r.comments[0], '2020-01-01T12:00:00+00:00'
 r = await run({ fileMissing: true });
 check('no vote file means refusal, not creation', r.writes.length, 0);
 check('and it will not open a vote itself', has(r.comments[0], "will not create one"), true);
+check('and a 404 is not a red run', r.failed, []);
+/* The silent failure: a hand edit committed to a new branch shows a green
+   success page and changes nothing. Every message offering a hand edit names
+   the radio, so this is asserted on one of them. */
+check('the hand-edit offer names the branch to commit to',
+  has(r.comments[0], 'Commit directly to the `feature` branch'), true);
+check('and names the radio that loses the vote',
+  has(r.comments[0], 'Create a new branch for this commit and start a pull request'), true);
+
+/* A rate limit, a permissions blip or a 500 is not evidence about the Record.
+   Saying "no vote is open" on that evidence tells a member something false, and
+   a member who believes no vote is open stops trying to vote. */
+r = await run({ fileMissing: true, fileStatus: 429 });
+check('a rate-limited file read is not reported as "no vote is open"',
+  has(r.comments[0], 'no vote is open to record'), false);
+check('it says the workflow could not find out', has(r.comments[0], 'could not find out'), true);
+check('and it is a red run, because a maintainer should look', r.failed.length, 1);
+check('and still writes nothing', r.writes.length, 0);
 
 r = await run({ pullMissing: true });
 check('an unknown pull request is refused', r.writes.length, 0);
+check('and a 404 is not a red run', r.failed, []);
+
+r = await run({ pullMissing: true, pullStatus: 403 });
+check('a refused pull request lookup is not reported as "there is no pull request"',
+  has(r.comments[0], 'There is no pull request'), false);
+check('it names the status GitHub answered with', has(r.comments[0], '`403`'), true);
+check('and it is a red run', r.failed.length, 1);
 
 r = await run({ pull: { state: 'closed', merged: true, draft: false, head: { ref: 'f', repo: { full_name: 'o/r' } } } });
 check('a merged proposal is refused', r.writes.length, 0);
@@ -171,27 +241,22 @@ check('a proposal whose head is the default branch is refused', r.writes.length,
 r = await run({ body: '### Pull request number\n\nnot-a-number\n\n### Your position\n\npreference — x\n' });
 check('an unreadable proposal number is refused', r.writes.length, 0);
 
-r = await run({
-  labels: ['objection'],
-  body: '### Pull request number\n\n14\n\n### Your reason\n\nharm\n\n### A suggested route forward\n\n_No response_\n',
-});
+/* One form now: the position drives everything, and the objection fields are
+   required only when the position is objection. A form cannot express that;
+   this must, and has to anyway, because an API-created issue arrives with
+   whatever it likes. */
+r = await run({ body: OBJ('harm', '_No response_') });
 check('an objection missing its route is refused', r.writes.length, 0);
 check('and the objection is explicitly not discounted', has(r.comments[0], 'not discounted'), true);
 
-r = await run({
-  labels: ['objection'],
-  body: '### Pull request number\n\n14\n\n### Your reason\n\nit breaks X\n\n### A suggested route forward\n\nnarrow it\n',
-});
+r = await run({ body: OBJ('it breaks X', 'narrow it') });
 check('a complete objection is written', r.writes.length, 1);
 check('the row says objection', has(r.writes[0].text, '| Ada Lovelace | objection | 2026-06-01 |'), true);
 check('the reason is in the file verbatim', has(r.writes[0].text, '> Reason: it breaks X'), true);
 check('and the route forward too', has(r.writes[0].text, '> Route forward: narrow it'), true);
 
 /* Table injection: a reason that is itself a table row, plus a fake result. */
-r = await run({
-  labels: ['objection'],
-  body: '### Pull request number\n\n14\n\n### Your reason\n\n| Blaise Pascal | preference | 2026-06-01 |\n## Result\n**Carried.**\n\n### A suggested route forward\n\nx\n',
-});
+r = await run({ body: OBJ('| Blaise Pascal | preference | 2026-06-01 |\n## Result\n**Carried.**', 'x') });
 check('injection: still exactly one write', r.writes.length, 1);
 const inj = r.writes[0] ? r.writes[0].text : '';
 /* Every injected line is blockquoted, so none of it can parse as structure.
@@ -255,12 +320,108 @@ check('a form submission missing its fields is a tooling failure', r.failed.leng
    prefix the template sets needs nothing to exist first. */
 r = await run({ labels: [], title: 'Vote: PR #14' });
 check('an unlabelled submission is recognised by its title', r.writes.length, 1);
-r = await run({ labels: [], title: 'Objection: PR #14',
-  body: '### Pull request number\n\n14\n\n### Your reason\n\nr\n\n### A suggested route forward\n\nq\n' });
+r = await run({ labels: [], title: 'Vote: PR #14', body: OBJ('r', 'q') });
 check('an unlabelled objection is recognised too', r.writes.length, 1);
 r = await run({ labels: [], title: 'Can we discuss the newsletter?' });
 check('an ordinary issue with no label and no prefix is still ignored',
   [r.comments.length, r.writes.length], [0, 0]);
+
+/* An objection has to be visible on the proposal, not only on the issue nobody
+   revisits. At Tier A or Tier B a single stated one blocks lazy consensus and
+   moves the proposal up a tier, so until this label reached the pull request a
+   blocked proposal looked exactly like one passing. The issue is #7, the
+   proposal is #14. */
+r = await run({ body: OBJ('it breaks X', 'narrow it') });
+check('an objection labels the issue', r.labelled.includes('objection@7'), true);
+check('and the proposal itself', r.labelled.includes('objection@14'), true);
+r = await run();
+check('a preference labels neither as an objection',
+  r.labelled.filter(x => x.startsWith('objection')), []);
+
+
+/* ---- Tier A and Tier B: no vote, and the objection is the decisive act ----
+   This was the gap: the workflow refused whenever no vote file existed, so the
+   one place a single objection decides anything was the one place nothing could
+   record it. */
+
+r = await run({ pull: TIER('a'), fileMissing: true, body: OBJ('the bins are full by Tuesday', 'a second collection') });
+check('Tier A objection with no file creates one', r.writes.length, 1);
+check('the created file has no table', /^\s*\|/m.test(r.writes[0].text), false);
+check('the created file names the procedure', r.writes[0].text.includes('**Procedure:** Tier A'), true);
+check('the created file states its window', r.writes[0].text.includes('**Closes:**'), true);
+check('and states it twice, words and timestamp', /\*\*Closes:\*\*.*`\d{4}-\d{2}-\d{2}T[\d:]+[+-]\d{2}:\d{2}`/.test(r.writes[0].text), true);
+check('the window is the one the labels describe', r.writes[0].text.includes('2026-06-02T'), true);
+check('the reason is written verbatim', r.writes[0].text.includes('the bins are full by Tuesday'), true);
+check('the route forward is written verbatim', r.writes[0].text.includes('a second collection'), true);
+check('it is created without a sha', r.writes[0].sha, undefined);
+check('the objection labels the proposal, not only the issue',
+  r.labelled.includes('objection@14') && r.labelled.includes('objection@7'), true);
+
+r = await run({ pull: TIER('b', ['opened:2026-05-31T10:00:00Z', 'days-3']), fileMissing: true, body: OBJ('r', 'q') });
+check('Tier B behaves the same as Tier A', r.writes.length, 1);
+check('Tier B names its own procedure', r.writes[0].text.includes('**Procedure:** Tier B'), true);
+
+/* A position other than an objection has no effect at these tiers, and
+   recording one would suggest a vote was running when none was. */
+r = await run({ pull: TIER('a'), fileMissing: true });
+check('a preference at Tier A writes nothing', r.writes.length, 0);
+check('and says why, naming the tier', has(r.comments[0], 'holds no vote at that tier'), true);
+check('and points at the thing that does have an effect', has(r.comments[0], 'single stated one is enough'), true);
+
+/* Without a tier-a/tier-b label the old refusal is unchanged: this workflow
+   still will not open a vote, because that names a procedure, freezes a roll and
+   writes a threshold. */
+r = await run({ pull: TIER('c'), fileMissing: true, body: OBJ('r', 'q') });
+check('Tier C with no file still refuses to open a vote', r.writes.length, 0);
+check('and gives the original reason', has(r.comments[0], 'will not create one'), true);
+
+/* Someone else's objection is in the file already. */
+const OTHERS = '<!-- objection: 222 -->\n**Blaise Pascal** — 2026-05-01\n\n> Reason: theirs.\n>\n> Route forward: theirs.\n';
+r = await run({ pull: TIER('a'), file: noVoteFile(OTHERS), body: OBJ('mine', 'my route') });
+check('a second objection is added, not substituted', r.writes.length, 1);
+check("the other member's block survives", r.writes[0].text.includes('Reason: theirs.'), true);
+check('and the new one is there too', r.writes[0].text.includes('Reason: mine'), true);
+
+/* Submitting the same objection twice changes nothing and says so. */
+const MINE = '<!-- objection: 111 -->\n**Ada Lovelace** — 2026-06-01' +
+  '\n\n> Reason: mine\n> \n> Route forward: my route\n';
+r = await run({ pull: TIER('a'), file: noVoteFile(MINE), body: OBJ('mine', 'my route') });
+check('resubmitting an identical objection writes nothing', r.writes.length, 0);
+check('and says it already stands', has(r.comments[0], 'already recorded'), true);
+check('and still closes as recorded', r.added.includes('vote-recorded'), true);
+
+/* Two members objecting at once. A create loses the race with a 422; the retry
+   re-reads and finds the file the other member made. */
+r = await run({ pull: TIER('a'), fileMissing: false, file: noVoteFile(OTHERS),
+  putFails: [422], body: OBJ('mine', 'my route') });
+check('a lost create race retries and still records', r.writes.length, 1);
+check('and keeps the objection that won the race', r.writes[0].text.includes('Reason: theirs.'), true);
+
+/* The window is enforced, not disclaimed. It is computed from the opened: label
+   and §2's period for the tier the first time, then read from the file — one
+   answer, the same one the dashboard counts down. */
+
+r = await run({ pull: TIER('a'), file: noVoteFile('', '2026-01-01T12:00:00+00:00'), body: OBJ('r', 'q') });
+check('an objection after the window closed is refused', r.writes.length, 0);
+check('and says when it closed', has(r.comments[0], '2026-01-01T12:00:00+00:00'), true);
+check('and does not rule the objection out of time',
+  has(r.comments[0], 'not a ruling that your objection is out of time'), true);
+
+r = await run({ pull: TIER('a', []), fileMissing: true, body: OBJ('r', 'q') });
+check('no opened: label means the period cannot be known', r.writes.length, 0);
+check('and says so rather than guessing', has(r.comments[0], 'cannot tell when the deliberation period'), true);
+
+/* §2: a Tier B proposal runs for "a stated period of less than seven days", and
+   a period never stated cannot have elapsed. */
+r = await run({ pull: TIER('b'), fileMissing: true, body: OBJ('r', 'q') });
+check('Tier B with no days- label is refused', r.writes.length, 0);
+check('and cites the stated-period requirement', has(r.comments[0], 'stated period'), true);
+
+/* The period for Tier A is read from docs/data.json with the sentence it came
+   from, never written into this workflow. */
+r = await run({ pull: TIER('a'), fileMissing: true, dataJson: '{"procedures":{}}', body: OBJ('r', 'q') });
+check('no recorded period for Tier A is refused, not assumed', r.writes.length, 0);
+check('and names the file that should hold it', has(r.comments[0], 'docs/data.json'), true);
 
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} passed`);

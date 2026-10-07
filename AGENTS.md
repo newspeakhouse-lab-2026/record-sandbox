@@ -126,7 +126,7 @@ Determined by **actual effect**, never by convenience. Where two layers are argu
 | Layer 3 Policy | 1 endorsement + preference mapping + 7 days; **majority of all members** |
 | Layer 4 Constitutional | 2 endorsing reviews + 7 days; **two-thirds of all members** |
 | Emergency | Majority of those voting within 12h, quorum of **half**; expires after 7 days unless confirmed |
-| Re-ratification (§5) | 7 days, entered no later than 23 November; **two-thirds of all members** |
+| Re-ratification (§5) | 7 days, entered by the date §5 sets; **two-thirds of all members** |
 | Removal from membership (§4) | **two-thirds of all members other than the respondent** |
 | Adjudication remedy (§4) | **two-thirds of the other members who vote**, quorum **half of all other members** |
 
@@ -161,6 +161,7 @@ Before filing, check these too, and report what is missing rather than quietly f
 |---|---|
 | `.github/pull_request_template.md` | Pre-fills every pull request. It asks for the layer and its reasoning, the tier, the deliberation period, `Observed by:`, conflicts searched, source of authority for Layers 3 and 4, experiment fields, and the amendment record. **Fill it rather than replacing it** — a member's proposal is judged on what it contains. |
 | `.github/ISSUE_TEMPLATE/proposal.yml` | One issue form for proposing before any text exists. Three required fields: layer, what is proposed, and why that layer. |
+| `.github/ISSUE_TEMPLATE/vote.yml` | One form for all four positions, including an objection. A member submits it; `.github/workflows/record-vote.yml` writes their row into `votes/pr-{number}.md` on the proposal's branch, as them, or says why it could not. **You may fill it in only with a position the member has stated in terms** — see *Hard rules*. |
 | `.github/instrument-templates/` | Skeletons for a rule, a policy, a record of an adjudication and a vote, each naming the path it belongs at. The dashboard's *Start a proposal* button opens GitHub's editor prefilled with one. Read the right one before drafting rather than inventing a shape. |
 | `.github/workflows/label-proposals.yml` | Reads the pull request body and applies `layer-*`, `tier-*` and `days-*` labels; records `opened:` and `endorsed:`. It comments rather than failing when it cannot read a layer. |
 | `.github/workflows/check-record.yml` | Warns when the dashboard's figures no longer match the Record. Never fails a pull request. |

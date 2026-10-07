@@ -69,6 +69,12 @@ the two apart afterwards. Section 1 also requires an agent working on Laboratory
 infrastructure to be identifiable as that member's agent, which for a commit
 means saying so in it.
 
+A member may also submit their own position through a form and have a tool
+transcribe it. That is still the member writing their row: the commit names them
+as its author, names the tool as committer, and says which submission it came
+from. A tool may transcribe a position; it may not decide one, and no tool can
+check that — the same line the paragraph above draws for an agent.
+
 Where a member does not or cannot use GitHub, **the Convener writes the row and
 says so in the commit message.** Section 1 requires a reasonably equivalent route
 for any member who cannot use the tooling, and this is it. It is never recorded
@@ -84,6 +90,33 @@ A reason that exists only in a pull request comment is not in the Record — `gi
 clone` retrieves none of it, and nor does anything else that survives the
 platform. The one thing Section 2 insists an objection contain must not be the
 one thing kept outside the repository.
+
+## Tier A and Tier B hold no vote
+
+Section 2 passes a proposal at these tiers absent a stated objection. There is
+nothing to count, so the file has **no table** — and no roll, because nobody is
+being polled.
+
+It exists only when somebody objects. A file asserting that nobody did would be
+asserting a negative nothing can check: most deliberation runs in the governance
+channel, and no file can see it.
+
+**The objection still belongs in the Record, and more plainly than anywhere
+else.** This is the one place a single objection is decisive — it blocks lazy
+consensus and moves the proposal up a tier. The reason and the route forward
+Section 2 requires are the whole content of the file.
+
+**It states its window**, computed once from the proposal's `opened:` label and
+the period Section 2 gives the tier, and written out like every other dated line
+in the Record: the words, then the instant. That is the clock the dashboard
+already counts down, not a new one — and writing it here puts it in the Record,
+where a GitHub label is not. An objection submitted after it closes is refused,
+and the refusal says so without ruling the objection out of time: Section 3
+gives that to a Record Keeper.
+
+If the proposal reaches a tier that votes, the table is added to this same file
+and the `Procedure:` line is updated. The earlier objections stay: they were
+deliberation, and an escalation no more clears them than a restart does.
 
 ## The result
 
@@ -141,4 +174,6 @@ with this Constitution, whose votes it exists to record.
 `Observed by:` A vote's existence and outcome are visible in the file and its
 history. A vote held with no file recorded is visible as a merged proposal with
 no `votes/` entry. A row written by someone other than the member it names is
-visible in `git log`, which records who made every commit.
+visible in `git log`, which records who made every commit — and where a tool
+transcribed a submission, the commit names the member as author, the tool as
+committer, and the submission it came from.
