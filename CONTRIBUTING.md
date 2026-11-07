@@ -14,11 +14,12 @@ Almost all Laboratory members have write access, which is what lets you push a b
 
 | Action | How |
 |---|---|
-| Propose a new rule | Create a branch with the file → **Propose changes**. An issue first is optional, for proposing before the text exists |
+| Propose a new rule | The dashboard's **Start a proposal** button. It opens GitHub's editor at the right path with the right template, and committing offers to open the pull request |
 | Amend an existing rule | Open file → pencil icon → **Commit changes** → new branch → **Propose changes** |
 | Discuss a proposal | Comment on the pull request |
-| Record a vote | Your row in `votes/pr-{number}.md` on the proposal's branch — step 6 |
-| See what's being proposed | Open pull requests, open issues, **and** `git branch -a` — drafts live in branches |
+| Raise a problem you cannot draft yet | Open an issue. Issues are for discussion and adopt nothing |
+| Record a vote | Your row in `amendment-record/pr-{number}.md` on the proposal's branch — step 10 |
+| See what's being proposed | Open pull requests — plus the dashboard, which also lists drafts still sitting on a branch |
 | See the full history of a rule | Open the file → **History** |
 | See all current rules | Browse the repo on `main` |
 | Check thresholds and windows | `AGENTS.md` — or ask your agent |
@@ -68,18 +69,18 @@ policies/
     rationale.md                     Reasoning, explicitly not operative
 rules/
   rule-{name}.md                     Layer 2 — Standalone rules, no policy area or crossing several
-votes/
-  pr-{number}.md                     Positions on one proposal, beside the text it decides
+amendment-record/
+  pr-{number}.md                     How one proposal was decided, beside the text it decided
 disputes/
   dispute-{date}-{name}.md           A decision, binding on the parties only
 AGENTS.md                            Instructions for members' AI agents
 CLAUDE.md                            One line, pointing at AGENTS.md
 CONTRIBUTING.md                      This guide
 .github/
-  ISSUE_TEMPLATE/                    The Proposal form
+  ISSUE_TEMPLATE/                    One form: Record a position on a vote
   pull_request_template.md           What every pull request is asked for
   instrument-templates/              Skeletons for a rule, a policy, an adjudication, a vote
-  workflows/, scripts/               Labelling, and checks that warn rather than block
+  workflows/, scripts/               Labelling, recording a vote, and the checks. The Record check warns; the test suite fails the pull request
   ruleset-main.json                  A copy of the branch protection on main
 ```
 
@@ -109,36 +110,39 @@ Every amendment follows the same arc. The deliberation periods and thresholds di
 |---|---|---|---|
 | 1 | Set up, once — or not at all, if you use the website | You | Your machine |
 | 2 | Decide what you are proposing, and at which layer | You. An agent may advise; you decide | — |
-| 3 | *Optional:* open an issue, if you have no text yet | You or your agent | GitHub |
+| 3 | *Optional:* open an issue to discuss it first, if you have no text yet | You or your agent | GitHub |
 | 4 | Draft the instrument, and a `rationale.md` beside it | Your agent drafts; you own it | Your machine or GitHub |
 | 5 | Check it against what the Constitution requires | Your agent | — |
 | 6 | Branch, commit, open the pull request | You or your agent | GitHub |
 | 7 | Take it out of draft — it is posted to Discord automatically, and **this starts the deliberation clock** | You | GitHub, relayed |
 | 8 | Deliberate | You. An agent may draft your words; it may never post a position | Channel, pull request, meetings |
-| 9 | Endorsements, where the layer needs them | Other members. Never an agent | Pull request or channel |
-| 10 | Vote | Members. **Never an agent** | As the Constitution specifies — not GitHub |
-| 11 | Write the result into `votes/pr-{number}.md`, arithmetic shown | You, or a Record Keeper | The proposal's branch |
+| 9 | Endorsements, where the layer needs them — through the **Endorse** form (the dashboard button) | Other members, never the proposer. Never an agent | Endorse form → issue |
+| 10 | Vote, and record it | Members. **Never an agent** | Stating it is the vote, wherever you state it; `amendment-record/pr-{number}.md` is the evidence |
+| 11 | Write the result into `amendment-record/pr-{number}.md`, arithmetic shown | You, or a Record Keeper | The proposal's branch |
+| 11a | Complete `## Amendment record` in the pull request description — a workflow commits it | You, or a Record Keeper | The description; the file follows |
 | 12 | Verify the process and merge | A Record Keeper — §3: either may merge | GitHub |
 | 13 | Announce the result | The merging Record Keeper | Governance channel |
 
 A webhook posts repository events to Discord, so taking a proposal out of draft announces it without you doing anything further — that is the visibility Section 2 asks for. The relay posts a bare GitHub notification though, so saying what tier you are claiming and when the window closes still saves everyone reconstructing it later.
 
-Two things happen on their own as you go. When you fill in the Layer, Tier and Deliberation period, a workflow turns them into **labels**; and when you take the pull request out of draft it adds an **`opened:`** label recording the moment, which is what shows that a deliberation period began. A second label, **`endorsed:`**, counts endorsing reviews. Nobody writes these by hand.
+Three things happen on their own as you go. When you fill in the Layer, Tier and Deliberation period, a workflow turns them into **labels**; and when you take the pull request out of draft it adds an **`opened:`** label recording the moment, which is what shows that a deliberation period began. A second, **`endorsed:`**, counts endorsements made through the Endorse form. A third, **`objection`**, is added to the proposal when someone objects through the form — the dashboard reads it to know there is an objection file to show. Nobody writes any of them by hand.
+
+And when you fill in `## Amendment record` in the description, a workflow commits it to `amendment-record/pr-{number}.md` on your branch within seconds, and keeps it in step as you edit. It copies your words and composes nothing; the commit is authored by you. It will not overwrite a record somebody wrote into that file by hand, and it says so rather than doing it.
 
 The [dashboard](https://newspeakhouse-lab-2026.github.io/constitutional-record/) reads them, so a proposal with no layer recorded is shown as **No layer recorded** rather than appearing to have no window running. If your proposal looks wrong there, the labels are the place to look.
 
 ### What starts the clock
 
-It differs by layer, and the Constitution is explicit for only two of them.
+It differs by layer. The Constitution is explicit for two of them; for Layer 3 the tooling applies a reading, noted below.
 
 | | What starts deliberation |
 |---|---|
 | **Tier A** | The 48 hours **is** the period the proposal is visible in the governance channel (Constitution §2) — which the Discord relay does for you when you take it out of draft. |
 | **Tier B and C** | The stated period. **The Constitution does not say what triggers it.** |
-| **Layer 3 Policy** | Seven days, after an endorsing member and the preference-mapping step. The trigger is not stated. |
-| **Layer 4** | **"Two endorsing reviews start the 7-day deliberation clock"** — explicit, and those are reviews on the pull request. This clock runs on GitHub. |
+| **Layer 3 Policy** | Seven days, started by **one endorsement** through the Endorse form. §2 says only "at least one other member must endorse" without naming the trigger; the tooling reads that endorsement as the starting gun — the same mechanism as Layer 4, and a reading the Lab can change. This clock runs on GitHub. |
+| **Layer 4** | **"Two endorsing reviews start the 7-day deliberation clock"** — the Laboratory reads an "endorsing review" as an endorsement through the form (§2 names no platform). This clock runs on GitHub. |
 
-Where the Constitution is silent, the safe practice is the same as Tier A: post it to the channel with the link and the tier, and say when the window closes. Then nobody can dispute later when it began. **But do not assume every clock runs in the channel — a Layer 4 amendment sitting without two endorsing reviews has not started at all**, however long it has been open, and however much it has been discussed.
+For Tier B and C, where the Constitution names no trigger, the safe practice is the same as Tier A: post it to the channel with the link and the tier, and say when the window closes. **But Layer 3 and Layer 4 clocks run on GitHub, not in the channel — a Layer 4 amendment without its two endorsements, or a Layer 3 policy without its one, has not started at all**, however long it has been open or discussed.
 
 ### Working with an AI agent
 
@@ -199,7 +203,7 @@ Section 1 says an agent must be **documented and communicated to the rest of the
 2. **Say so on every proposal it helped prepare**, naming yourself as the member responsible. That is the identifying, and Section 1 requires it separately: an agent acting on Laboratory infrastructure must be *clearly identifiable as that member's agent*.
 3. **Mark its commits.** A `Co-Authored-By:` trailer naming the agent does this, and survives in the history where a pull request comment does not.
 
-#### Two labels it must never touch
+#### Three labels it must never touch
 
 The `opened:` and `endorsed:` labels are written by a workflow. **An agent must not add, edit or remove either by hand.** The `opened:` label is the evidence that a deliberation period began, and evidence an agent can write is not evidence. If one looks wrong, it is for a member to fix.
 
@@ -211,11 +215,17 @@ It is your proposal. Section 1 is unambiguous that an agent's actions are the me
 
 The table above is the summary. This is the detail, for the steps that have any.
 
-### Deciding whether you need an issue
+### Issues are for discussion. Proposals are pull requests.
 
-**An issue cannot adopt anything.** It holds discussion, not text, and Constitution §1 requires that a rule's exact adopted text appear in the Record. Only a merged pull request does that.
+One rule, and it has no exceptions:
 
-So the pull request is the proposal of record, and its template asks for everything the Constitution requires. **Open an issue first only when it helps** — when you want to propose a rule before drafting its wording, or deliberate on whether a rule should exist before arguing about its text. Go to **Issues → New issue** and use the Proposal form: it asks three things (the layer, what you are proposing, and why that layer) and then tells you what the pull request will need. If you already have the text, go straight to a pull request.
+> **To propose anything, open a pull request. Issues are for talking.**
+
+**An issue cannot adopt anything.** It holds discussion, not text, and §1 requires a rule's exact adopted text to appear in the Record. Only a merged pull request puts it there — so an issue is never the step that decides anything, and a proposal that started as one still has to become a pull request before it can be adopted.
+
+Use an issue when you want to **think out loud**: something is wrong and you do not know what the rule should say, or you want to find out whether anyone else cares before you spend an evening drafting. That is a real and useful thing, and it is all an issue is for. The dashboard lists open issues under *Under discussion*, so raising one makes the question visible to everyone without committing you to a draft.
+
+When you do have text — even rough text — go straight to a pull request. The dashboard's **Start a proposal** button opens GitHub's editor at the right path with the template already in it, and committing there offers to create the branch and open the pull request for you. No git, no terminal.
 
 A proposal is classified by its **actual effect**, not by the label you choose. Where two layers are reasonably arguable, the more demanding process applies.
 
@@ -247,60 +257,78 @@ git push -u origin rule-quiet-hours
 gh pr create          # fills in the pull request template
 ```
 
-For constitutional amendments, edit `constitution.md` on a new branch. Two endorsing reviews on the pull request start the seven-day clock.
+For constitutional amendments, edit `constitution.md` on a new branch. Two endorsements through the Endorse form start the seven-day clock.
 
 ### Filling in the pull request template
 
-The pull request is pre-filled with everything the Constitution requires: the layer **and the reasoning for it**, the tier, the `Observed by:` line if the proposal creates any duty, the conflicts you searched, the source of authority for a Policy or an amendment, and the experiment fields if it is one. Link an issue with `Resolves #N` if you opened one.
+The pull request is pre-filled with everything the Constitution requires: the layer **and the reasoning for it**, the tier, the `Observed by:` line if the proposal creates any duty, the conflicts you searched, the source of authority for a Policy or an amendment, and the experiment fields if it is one. If you discussed it in an issue first, link it with `Resolves #N` so the discussion and the text stay connected.
 
-You don't need everything immediately — the amendment record and the vote evidence are completed after deliberation, before merge.
+You don't need everything immediately. The vote evidence is written as the vote happens. The amendment record is the one part you cannot finish at the start — *how it was made* is not known until the window has closed — so fill in what you can and come back to it; the file keeps pace with the description.
 
 ### Discussion and deliberation
 
 The pull request is visible to all members and to the public. Discussion happens in the pull request, in the governance channel, and in meetings as needed.
 
-For Tier A the window **is** the proposal's visibility in the governance channel (Constitution §2), which the relay takes care of when you take it out of draft. For Layer 4 the clock starts when two endorsing reviews land on the pull request. See *What starts the clock* above — it is not the same rule for every layer. During it the proposal can be revised — the proposer or any member can push further commits to the branch. **A material change restarts any minimum deliberation period.** A correction that does not change the meaning does not.
+For Tier A the window **is** the proposal's visibility in the governance channel (Constitution §2), which the relay takes care of when you take it out of draft. For Layer 4 the clock starts when two endorsements land through the Endorse form. See *What starts the clock* above — it is not the same rule for every layer. During it the proposal can be revised — the proposer or any member can push further commits to the branch. **A material change restarts any minimum deliberation period.** A correction that does not change the meaning does not.
 
 An objection is never a bare "no": it is stated with its reason and a suggested route forward. A single stated objection moves an Ordinary proposal **up** a tier. It can never move down.
 
 ### Endorsing
 
-Two layers need an endorsement before anything else happens, and for one of them the endorsement **is** the starting gun.
+Two layers need an endorsement before anything else happens, and for both the endorsement **is** the starting gun — the clock does not run until it lands.
 
 | | |
 |---|---|
 | **Layer 3 Policy** | "At least one other member must endorse" |
 | **Layer 4 Constitutional** | "**Two endorsing reviews start the 7-day deliberation clock**" |
 
-So a constitutional amendment's clock does not run from when it was opened. It runs from the moment the second member reviews it. An amendment nobody reviews has no window running, however long it has been sitting there — which is the position pull request #2 is in.
+So a constitutional amendment's clock does not run from when it was opened. It runs from the moment the second member endorses it — and a Layer 3 policy's clock, likewise, from its one endorsement. A proposal nobody endorses has no window running, however long it has been sitting there.
 
 **Endorsing is not supporting.** It says *this deserves to be deliberated*, not *I agree with it*. You can endorse an amendment onto the agenda and then vote against it, and that is a perfectly coherent thing to do.
 
 This matters more than it sounds. If people treat endorsement as agreement, then anyone who opposes an amendment can stop it being deliberated at all simply by declining to review — **a veto the Constitution never granted anyone.** Opposition belongs in the vote, where it is counted and recorded.
 
-In practice an endorsement is an **approving review** on the pull request. The Constitution says "endorsing reviews" without defining them; approving review is the reading the tooling uses, and it is a reading rather than a quotation. If the Laboratory means something else by it, say so and the tooling should follow.
+In practice you endorse through the dashboard's **Endorse this proposal** button, which opens the *Endorse a proposal* form — the same issue-form route the Object and Vote buttons use, so it needs only read access and works whether or not you can push. A workflow records your endorsement as you, updates the count the dashboard shows, and once the required number is in it starts the clock and opens the vote. You cannot endorse your own proposal — §2 asks for *another* member — and endorsing twice counts once. Counting from these forms rather than from a GitHub "approving review" is a reading of §2, which says "endorse" / "endorsing reviews" and names no platform; it is the reading the Laboratory has taken. The count is taken from the forms themselves, which carry each endorser's identity unforgeably, never from a label anyone could set by hand. If the Laboratory means something else, say so and the tooling follows.
 
 ### Voting
 
-Tier A and Tier B hold no vote: they pass unless someone objects. Tier C, Layer 3, Layer 4, re-ratification and the Section 4 procedures do vote.
+Tier A and Tier B hold no vote: they pass unless someone objects — see *Objecting at Tier A or Tier B* below. Tier C, Layer 3, Layer 4, re-ratification, Emergency, the Section 3.9 recall and the Section 4 procedures do vote.
 
 A position may be stated anywhere — in the governance channel, in person, by message. **Stating it is the vote; the file is the evidence of it.** Nobody loses a vote for not using GitHub.
 
+### Objecting at Tier A or Tier B
+
+This is the commonest decisive act in the Constitution, and the only one that changes what happens at these tiers. **A single stated objection moves the proposal up a tier** — Tier A to Tier B, Tier B to Tier C. It never moves it down, and it never stops it outright.
+
+**Use the form.** The dashboard's **Object to this proposal** button, or Issues → New issue → *Record a position on a vote*. Section 2 asks an objection to carry two things: the harm you foresee, and a route forward the cohort can act on. The form asks for both.
+
+A workflow creates `amendment-record/pr-{number}.md` on the proposal's branch, writes your reason and route **word for word**, commits it as you, and labels the proposal `objection`. There is no table in that file and no row for you: no vote is held at these tiers, so there is nothing to count.
+
+**Only an objection can be recorded here.** Preference, toleration, abstention and saying nothing are the same act at Tier A and Tier B — the proposal passes absent an objection — so the form will tell you why it cannot record any of them. To express support, say so on the proposal or in the governance channel.
+
+**Not in a pull request comment.** `git clone` retrieves none of it, so a reason that lives only there is not in the Record — and the reason is the one thing Section 2 insists an objection contain.
+
 ### Recording a vote
 
-In **`votes/pr-{number}.md`, on the proposal's own branch**, so the evidence merges into the Record beside the text it adopted. Start it from `.github/instrument-templates/vote.md`; the dashboard's *Start a vote* button opens it prefilled.
+For the procedures that do vote. In **`amendment-record/pr-{number}.md`, on the proposal's own branch**, so the evidence merges into the Record beside the text it adopted. Start it from `.github/instrument-templates/vote.md`; the dashboard's *Start a vote* button opens it prefilled.
 
 One table, one row per member — **all of them, including anyone who has said nothing**, because every threshold is a fraction of everyone entitled to vote, and you cannot check the arithmetic unless you can see them all.
 
-To record your own position, change your row to `preference`, `toleration`, `abstention` or `objection`, with the date. The dashboard links straight to your file.
+**Use the form.** Issues → New issue → **Record a position on a vote**, or the button on the dashboard, which fills in the pull request number. One form for all four positions; the reason and route forward an objection needs are asked of everyone and required only from an objection. A workflow writes your row as you and replies with a link to the commit, or says why it could not. It needs only read access, so it is the route that works if you cannot push.
+
+**If it refuses you, edit the file by hand** — change your row to `preference`, `toleration`, `abstention` or `objection`, with the date. Every refusal gives you the link and the warning below. It is the route that always works, which is why it is a fallback rather than a second front door.
+
+> **When you commit, choose "Commit directly to the `{branch}` branch".** The other option — *"Create a new branch for this commit and start a pull request"* — is the right one for a proposal and the wrong one for a vote. It puts your position on a branch of its own, where nothing reads it, and then shows you a green success page. You will believe you have voted and nothing in the Record will have changed. This is the one way to lose a vote without being told, which is why the workflow names the same radio in every message that offers a hand edit.
 
 > **Only `preference` counts as affirmative support.** At Layer 3, Layer 4 and re-ratification, toleration, abstention and never answering are the same number. None of them is a yes.
 
 **An objection goes in the file, in full** — its reason *and* a suggested route forward, both of which Section 2 requires. A reason that lives only in a pull request comment is not in the Record: `git clone` retrieves none of it. Link the discussion for context; put the operative sentences in the file.
 
-When the window closes, write the result in with the arithmetic shown, so a Record Keeper verifying it under Section 3 has something to verify *against*. `python3 .github/scripts/tally.py votes/pr-{number}.md` recomputes it and prints the working; it is advisory, and a check warns if the written result and the rows disagree.
+When the window closes, write the result in with the arithmetic shown, so a Record Keeper verifying it under Section 3 has something to verify *against*. `python3 .github/scripts/tally.py amendment-record/pr-{number}.md` recomputes it and prints the working; it is advisory, and a check warns if the written result and the rows disagree.
 
-Section 1's amendment record — the assumptions the decision rests on, its status, explanatory notes — belongs in the same file. **Not in the pull request description:** a merge commit carries only the title, so a description never enters the repository at all.
+Section 1's amendment record — how it was made, the assumptions it rests on, its status, notes from the discussion, abstentions or objections — goes in the **pull request description**, under `## Amendment record`. A workflow copies it into `amendment-record/pr-{number}.md` on this branch, so it merges along with the text it records. Fill it in once, where you were already writing; edit the description later and the file follows.
+
+It is kept in both places on purpose. Nothing typed in a description is lost — GitHub keeps it, and keeps an edit history for it — but `git clone` retrieves no descriptions, and a clone is the only copy of the Record that outlives GitHub. A description can also be edited in place, where the file's history may not be rewritten, and Section 1 ties the record's date to a commit timestamp.
 
 ### Merging
 
@@ -314,19 +342,20 @@ The Record Keeper announces the result in the governance channel with a link to 
 
 ## What GitHub enforces, and what it cannot
 
-`main` is protected by a repository ruleset, recorded in `.github/ruleset-main.json` so the configuration is reviewable here rather than visible only to administrators. It enforces three things:
+`main` is protected by a repository ruleset, recorded in `.github/ruleset-main.json` so the configuration is reviewable here rather than visible only to administrators. It enforces four things:
 
 - **Every change arrives as a pull request.** Nobody commits to `main` directly.
 - **The branch cannot be deleted or force-pushed**, so the history cannot be quietly rewritten.
 - **Only organisation administrators can merge** — currently the two Record Keepers, which is what Constitution §3 means by *"the only members with merge access"*.
+- **Merge is the only merge method.** Squash would collapse every per-position commit on a vote into one, authored by whoever pressed the button. That authorship is half of how a vote is attributed, and `git log` on the vote file is what a Record Keeper verifies against.
 
 > **Merging will tell you the rules block it, and offer to bypass.** That is expected, and it is not a violation. The ruleset restricts who may update `main`, and organisation administrators are the exception that makes merging possible for the Record Keepers and nobody else — so GitHub presents the permission as an override. Take the bypass. What it does not excuse is skipping the verification the bypass exists for: that the deliberation period actually ran, and that the recorded outcome matches it.
 
-**No approving review is required, deliberately.** A Layer 2 proposal needs no endorsement, so requiring an approval would have forced a procedural click on a rule that passed by nobody objecting — and the dashboard would then have counted that click as an endorsement.
+**No endorsement is required for Layer 2, deliberately.** An Ordinary (Layer 2) proposal needs no endorsement, so requiring one would have forced a procedural act on a rule that passes by nobody objecting — and the dashboard would then have counted it as an endorsement.
 
 Three things it does **not** do, all of which are why a Record Keeper verifies rather than rubber-stamps:
 
-**It cannot enforce the endorsements a layer requires.** A Layer 4 amendment needs two endorsing reviews and a Layer 3 Policy needs one, and nothing here checks that before the merge button works. §1 describes protection that *"enforces approval requirements per path"*, but GitHub cannot vary a required review count by file, so no setting expresses it. The verification is the Record Keeper's, which is what their office is for.
+**The branch ruleset cannot enforce the endorsements a layer requires.** A Layer 4 amendment needs two endorsements and a Layer 3 Policy one; endorsements are recorded as issues through the Endorse form, which no *merge-button* setting can see or count. What enforces them upstream is the `record-amendment` workflow — it will not open the vote (build the roll, start the clock) until the required endorsements are in, counted from the issue trail. The merge itself is still the Record Keeper's verification, which is what their office is for.
 
 **It cannot see the governance channel**, where most deliberation actually runs. Absence of objection on a pull request is not proof of lazy consensus.
 
@@ -395,6 +424,6 @@ Section 1 provides that GitHub branch protection enforces approval requirements 
 
 `.github/ruleset-main.json` records the live configuration so a change to who can merge is something members can read and object to, rather than a setting two administrators can alter silently. If the file and the live settings disagree, the settings are what is in force and the file is wrong.
 
-**What is still carried by people, not by settings.** Nothing checks that a Layer 4 amendment has its two endorsing reviews, or that a Layer 3 Policy has its one, before the merge button works — the Record Keeper's verification is the only control, which is what their office is for. And pushing a rule straight to `main` would not make it a rule in any case: validity comes from the procedure, and Section 1 is explicit that a repository edit or commit does not itself create authority.
+**What is still carried by people, not by the branch ruleset.** The ruleset does not check that a Layer 4 amendment has its two endorsements, or a Layer 3 Policy its one, before the merge button works — though the `record-amendment` workflow will not open the vote without them, so the clock never starts unenforced. The merge is the Record Keeper's verification. And pushing a rule straight to `main` would not make it a rule in any case: validity comes from the procedure, and Section 1 is explicit that a repository edit or commit does not itself create authority.
 
 > **Merge rights and the office can come apart.** Merge rights are tied to organisation administrators, because that is how the Record Keeper office is implemented. The interim terms end at the date `roles.md` records. If they lapse without an election, the office is vacant while the access stays with whoever happens to hold it — and Section 3's fallback, that the Convener covers unfilled roles, does not help, because the Convener's term ends at the same moment. Whoever fills these offices should make sure merge rights follow the office rather than the other way round.

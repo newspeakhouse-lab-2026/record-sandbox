@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Recompute a vote from its own file, and show the working.
 
-    python3 .github/scripts/tally.py votes/pr-14.md
+    python3 .github/scripts/tally.py amendment-record/pr-14.md
 
 Advisory. Section 3 gives the outcome to a Record Keeper, who verifies that the
 vote happened and that the correct outcome is recorded. This prints arithmetic to
@@ -20,6 +20,11 @@ import sys
 POSITIONS = ("preference", "toleration", "abstention", "objection")
 
 # What a member writes in **Procedure:** -> the key in data.json's thresholds.
+# Tier A and Tier B hold no vote at all: §2 passes the proposal absent a stated
+# objection. Their files carry objections and no table, and that is correct, not
+# a defect — so they are named here rather than inferred from a missing table.
+NO_VOTE = {"tier a", "tier b"}
+
 PROCEDURES = {
     "tier a": None, "tier b": None,          # no vote: pass absent an objection
     "tier c": "tier-c",
@@ -31,6 +36,17 @@ PROCEDURES = {
     "remedy": "remedy", "§4 remedy": "remedy",
     "removal": "removal", "§4 removal": "removal",
 }
+
+
+def objections_in(text):
+    """Who objected, and when. Bounded to the Objections section: ## Notes holds
+    blocks of the same shape, and counting those as objections would be wrong."""
+    m = re.search(r"^## Objections\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
+    if not m:
+        return []
+    # An en dash is the easier Mac keystroke and was silently erasing objections.
+    return [(n.strip(), d.strip())
+            for n, d in re.findall(r"^\*\*(.+?)\*\*\s*[\u2014\u2013-]\s*(\S+)", m.group(1), re.M)]
 
 
 def ceil_div(a, b):
@@ -52,7 +68,15 @@ def required(spec, d):
     return None
 
 
-def tally(procedure, roll, counts, thresholds, excluded=0):
+def tally(procedure, roll, counts, thresholds, excluded=0, no_vote=False, objections=()):
+    if no_vote:
+        # Distinct from "no threshold recorded", which says something is missing.
+        # Nothing is missing: §2 holds no vote at these tiers.
+        return {"procedure": procedure, "electorate": roll, "counts": dict.fromkeys(POSITIONS, 0),
+                "responders": 0, "nonResponse": 0, "verdict": "no-vote",
+                "objections": list(objections), "source": "\u00a72",
+                "note": ("no vote is held at this tier: \u00a72 passes the proposal absent a stated "
+                         "objection, and a single stated one moves it up a tier")}
     spec = thresholds.get(procedure)
     electorate = roll - excluded
     got = {p: int(counts.get(p, 0)) for p in POSITIONS}
@@ -72,6 +96,15 @@ def tally(procedure, roll, counts, thresholds, excluded=0):
         out["note"] = "no threshold recorded for this procedure"
         return out
 
+    # A quorum is a count of responders over all members, which the Constitution
+    # does state even where it leaves the majority's denominator open -- §2's
+    # Emergency procedure is exactly that case, and #45's first round failed on
+    # it. So it is counted before the no-verdict branch, not after.
+    quorum = spec.get("quorum")
+    if quorum:
+        out["quorumRequired"] = required(quorum, electorate)
+        out["quorumMet"] = responders >= out["quorumRequired"]
+
     # The Constitution does not settle these, and guessing a number would set a
     # threshold, which Section 2 reserves to Layer 4.
     if spec.get("verdict") == "none" or spec.get("rule") in ("unspecified", "none"):
@@ -82,11 +115,6 @@ def tally(procedure, roll, counts, thresholds, excluded=0):
         }
         out["note"] = "the Constitution does not state the denominator"
         return out
-
-    quorum = spec.get("quorum")
-    if quorum:
-        out["quorumRequired"] = required(quorum, electorate)
-        out["quorumMet"] = responders >= out["quorumRequired"]
 
     over = spec.get("over")
     d = got["preference"] + got["objection"] if over in ("voting", "others-voting") else electorate
@@ -117,9 +145,16 @@ def parse(text):
         return None, f'procedure "{raw}" is not one the Constitution names'
 
     rows, counts, excluded, bad = [], {p: 0 for p in POSITIONS}, 0, []
+    # ONE table, the first. The scan used to run to the end of the file, so a
+    # comparison table pasted under ## Notes -- which the template invites -- was
+    # counted into the roll and the affirmative total.
+    started = False
     for line in text.split("\n"):
         if not line.lstrip().startswith("|"):
+            if started:
+                break
             continue
+        started = True
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) < 2 or re.fullmatch(r"[:\-\s]+", cells[0] or "-"):
             continue
@@ -140,6 +175,18 @@ def parse(text):
     if len(rows) != len(set(rows)):
         dupes = sorted({n for n in rows if rows.count(n) > 1})
         return None, f"duplicated row(s) for {', '.join(dupes)}, so the denominator is ambiguous"
+    holds_vote = raw.lower() not in NO_VOTE
+    objections = objections_in(text)
+    if not holds_vote:
+        # The reverse of the usual complaint: a table here means the Procedure
+        # line was never updated when a vote was opened, which would hand every
+        # reader the wrong arithmetic.
+        if rows:
+            return None, (f'**Procedure:** says "{raw}", which holds no vote, but the file has a table. '
+                          "If a vote was opened, the Procedure line has to say which one.")
+        return {"procedure": key, "roll": 0, "counts": counts, "excluded": 0,
+                "holdsVote": False, "objections": objections,
+                "restarted": None, "earlier": []}, None
     if not rows:
         return None, "no table rows, so there is nobody to count"
 
@@ -150,11 +197,49 @@ def parse(text):
         return None, f"**Entitled to vote:** says {stated.group(1)} members but the table has {len(rows)} rows"
 
     return {"procedure": key, "roll": len(rows), "counts": counts, "excluded": excluded,
+            "holdsVote": True, "objections": objections,
             "restarted": restarted.group(1).strip() if restarted else None,
             "earlier": earlier}, None
 
 
+def how_it_was_made(r):
+    """The §1 "How it was made" line, composed from the procedure and the tallied
+    outcome — a fact, not a position (§1), so a Record Keeper can paste it at close
+    instead of wording it by hand. Returns None when there is no fact yet to state.
+
+    It asserts only what this script can see. For a vote that is the arithmetic.
+    For lazy consensus it cannot read the governance channel, so it states the
+    objections on GitHub and leaves the window-elapsed attestation to the Keeper."""
+    if r.get("verdict") == "no-vote":
+        obj = r.get("objections") or []
+        made = ("Lazy consensus. " + (f"{len(obj)} objection(s) recorded on GitHub"
+                if obj else "No objection recorded on GitHub within the window")
+                + (": " + "; ".join(f"{n} ({d})" for n, d in obj) if obj else "") + ".")
+        return made + (" Record Keeper: confirm the window elapsed without objection "
+                       "in the governance channel before recording.")
+    if r.get("verdict") == "none" or r.get("required") is None:
+        return None  # no threshold resolved → no outcome to state
+    c = r["counts"]
+    over = "preference and objection only" if r["over"] in ("voting", "others-voting") else "all members"
+    parts = [f"By vote ({r['procedure']}): {c['preference']} of {r['denominator']} "
+             f"preferred ({over}), needed {r['required']}"]
+    if "quorumRequired" in r:
+        parts.append(f"quorum {r['responders']} of {r['electorate']}, needed {r['quorumRequired']}"
+                     f" — {'met' if r['quorumMet'] else 'not met'}")
+    return "; ".join(parts) + ". " + ("Carried." if r["carried"] else "Did not carry.")
+
+
 def fmt(r, restarted=None, earlier=()):
+    if r.get("verdict") == "no-vote":
+        obj = r.get("objections") or []
+        lines = [f"{r['note']}."]
+        lines.append(f"  {len(obj)} objection(s) recorded"
+                     + (": " + "; ".join(f"{n} ({d})" for n, d in obj) if obj else ""))
+        lines.append("  NO VERDICT HERE — whether the window elapsed without objection is visible in "
+                     "the governance channel, which this script cannot read.")
+        lines.append("  How it was made: " + how_it_was_made(r))
+        lines.append("  Advisory. \u00a73 gives the outcome to a Record Keeper.")
+        return "\n".join(lines)
     rnd = f", round {len(earlier) + 1}" if earlier else ""
     lines = [f"{r['procedure']} — {r['electorate']} entitled to vote{rnd}"]
     for n, line in earlier:
@@ -165,6 +250,11 @@ def fmt(r, restarted=None, earlier=()):
     lines.append("  " + " · ".join(f"{p} {c[p]}" for p in POSITIONS) + f" · not answered {r['nonResponse']}")
 
     if r.get("verdict") == "none":
+        if "quorumRequired" in r:
+            lines.append(f"  quorum {r['responders']} of {r['electorate']} responded, needed "
+                         f"{r['quorumRequired']} — {'met' if r['quorumMet'] else 'NOT MET'}")
+            if not r["quorumMet"]:
+                lines.append("  Without its quorum it does not carry under any reading of the majority.")
         lines.append(f"  NO VERDICT — {r['note']}")
         for how, n in (r.get("readings") or {}).items():
             lines.append(f"    reading '{how}': would need {n}")
@@ -180,6 +270,9 @@ def fmt(r, restarted=None, earlier=()):
         over = "preference and objection only" if r["over"] in ("voting", "others-voting") else "all members"
         lines.append(f"  majority {c['preference']} of {r['denominator']} ({over}), needed {r['required']}")
     lines.append("  " + ("CARRIED" if r["carried"] else "DID NOT CARRY"))
+    _hm = how_it_was_made(r)
+    if _hm:
+        lines.append("  How it was made: " + _hm)
     lines.append("  Advisory. §3 gives the outcome to a Record Keeper.")
     return "\n".join(lines)
 
@@ -208,7 +301,9 @@ def main(argv):
             rc = 1
             continue
         print(fmt(tally(parsed["procedure"], parsed["roll"], parsed["counts"],
-                        thresholds, parsed["excluded"]),
+                        thresholds, parsed["excluded"],
+                        no_vote=not parsed.get("holdsVote", True),
+                        objections=parsed.get("objections") or ()),
                   parsed.get("restarted"), parsed.get("earlier") or ()))
     return rc
 

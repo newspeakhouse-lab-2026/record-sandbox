@@ -12,12 +12,15 @@ Tooling to help members draft and file proposals, held in this repository:
 |---|---|
 | `CONTRIBUTING.md` | How to propose, deliberate and record a decision, through the website or the command line |
 | `AGENTS.md` | Instructions for a member's AI agent working in this repository. `CLAUDE.md` is a one-line pointer to the same file |
-| `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md` | A proposal form and a pull request template, asking for what the Constitution requires |
+| `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md` | An issue form for recording a position on a vote, and a pull request template, asking for what the Constitution requires |
+| `.github/workflows/record-vote.yml` | Writes a member's own position into `amendment-record/pr-{number}.md` on the proposal's branch when they submit the vote form, as them, and comments with the commit. It refuses rather than guesses: it will not open a vote, attribute a position to an unidentified account, write after the window has closed, or write at all if the result fails its own checks. Where it cannot write, it says so and links the file, which is always editable by hand |
+| `.github/workflows/record-amendment.yml` | Copies the `## Amendment record` section of a proposal's pull request description into `amendment-record/pr-{number}.md` on its own branch, authored as the proposal's author, and keeps it in step as the description is edited. Constitution §1 requires a record of how every amendment was made for every amendment, including one adopted by lazy consensus, and asking for it twice is how it goes unwritten. It transcribes: the words are the author's, the run is triggered by their own edit, and it composes nothing. It refuses rather than guessing — never `main`, never a fork, never over a record written by hand, and never a file without a `**Procedure:**` line, which nothing downstream could read |
+| `.github/scripts/test-record-vote.mjs`, `.github/scripts/test-vote-parse.mjs`, `.github/scripts/test-record-amendment.mjs` | The vote workflow's logic and the dashboard's vote arithmetic, and the amendment-record workflow, each run against stubs. The workflow triggers on `issues`, which GitHub always runs from the default branch, so it cannot be exercised by the pull request that introduces it; the dashboard's arithmetic is lifted out of the page and driven from the same worked cases as `tally.py`, so the two cannot disagree |
 | `.claude/skills/` | Optional procedures an agent may load: `classify`, `draft-policy`, `review-agenda` |
 | `.claude/hooks/`, `.claude/settings.json` | A hook preventing an agent from merging, pushing to `main`, force-pushing or rewriting history **in a Record**. It identifies one by its own files and steps aside anywhere else. It does not prevent an agent from recording a position a member has stated: Section 1 makes an agent's actions the member's, so that is the member acting, disclosed by a `Co-Authored-By:` trailer on the commit. What an agent may not do is *decide* a position, and no hook can check that — `AGENTS.md` states it as a duty the agent holds rather than a door the tooling closes. The hook constrains a member's own agent in their own clone, and the member may switch it off |
-| `.github/workflows/label-proposals.yml` | Reads the layer, tier and deliberation period from a pull request body and applies them as labels, and records when a proposal opened and how many members have endorsed it |
+| `.github/workflows/label-proposals.yml` | Reads the layer, tier and deliberation period from a pull request body and applies them as labels, and records when a proposal that needs no endorsement opened. Reads an `[EMERGENCY]` tag in the title (§2) as an `emergency` label in place of a tier, and keeps one comment on such a proposal quoting what §2 says an Emergency resolution may not do |
 | `.github/scripts/test-label-proposals.mjs` | Runs the labelling workflow's own logic against a stubbed GitHub API. That workflow uses `pull_request_target`, which GitHub always runs from the default branch, so it cannot be tested by the proposal that introduces it |
-| `.github/workflows/check-record.yml`, `.github/scripts/check-record.py` | Warns when the dashboard's figures no longer match the Record — a quoted clause that has been amended, a time that disagrees with its own quote, an instrument that expires without saying so, a vote whose written result disagrees with its own rows |
+| `.github/workflows/check-record.yml`, `.github/scripts/check-record.py` | Warns when the dashboard's figures no longer match the Record — a quoted clause that has been amended, a time that disagrees with its own quote, an instrument that expires without saying so, a vote whose written result disagrees with its own rows, an Emergency resolution's instrument that ends later than seven days after its vote closes |
 | `.github/scripts/tally.py`, `.github/scripts/vote-cases.json` | Recomputes a vote from its own file and shows the working, so a Record Keeper verifying one under Section 3 has something to check against. Advisory: it decides nothing. The worked cases beside it state the arithmetic as data, and are read by both this and the dashboard so the two cannot disagree |
 | `.github/instrument-templates/` | Skeletons for a rule, a policy, a record of an adjudication and a vote. The dashboard's *Start a proposal* button asks which you are filing and opens GitHub's editor at the right path with the right one. Held as files so they cannot drift from the templates beside them |
 | `.github/ruleset-main.json`, `.github/ruleset-all-branches.json` | Copies of the branch protection applied to `main` and to every other branch, so the configuration is reviewable in the Record rather than visible only to repository admins. The second exists because a vote is recorded on a proposal's own branch: without it, a position could be force-pushed away before the proposal merged |
@@ -33,6 +36,8 @@ Tooling to help members draft and file proposals, held in this repository:
 Merging reports that the rules block it and offers a bypass. That is the permission working, not a violation: the ruleset restricts who may update `main`, and administrators are the exception that confines merging to the Record Keepers.
 
 Requiring no approving review is deliberate: a Layer 2 proposal needs no endorsement, so a required approval would have forced a procedural click that the dashboard would then have counted as an endorsement.
+
+**Merge is the only method allowed.** A vote is recorded one commit per position, each authored by the member whose position it is — that authorship is half of how a vote is attributed, and `git log` on the vote file is what Section 3 gives a Record Keeper to verify against. Squash collapses every one of those commits into a single commit authored by whoever pressed the button, and rebase rewrites them onto new hashes. Merge is also the only method that keeps the branch's own history, which is where a restarted vote's earlier rounds live.
 
 ## What this does not do
 
@@ -64,7 +69,34 @@ If the Laboratory later issues the Policy Section 2 anticipates, it supersedes t
 
 ## Amendment
 
-Any part of this rule may be amended by Ordinary resolution. Changes to files it adopts follow the same route.
+Any part of this rule may be amended by Ordinary resolution.
+
+**Changes to the tooling it adopts are operational, and a Record Keeper may merge them** —
+rebuilding, refactoring, restyling, fixing a defect, changing where data is read from, or
+building another way to read the Record. Section 1 allows this as reversible action within
+existing rules, and the inventory above is brought up to date with whatever is added.
+
+**Except in three files, named rather than described:** `record-vote.yml`,
+`objection-check.yml` and `record-amendment.yml`. A member's position passes through the
+first; the second decides whether an objection blocks a merge; the third writes into the
+same file as the first. A change to any of them is an Ordinary resolution, however small
+it looks. A Record Keeper may not alter the path a position travels, alone and unremarked.
+**A new tool that writes to the Record, or that decides whether a merge may proceed, is
+adopted by Ordinary resolution and named here as it is.** What a tool does decides this,
+not whether it is new.
+
+**No page may state a threshold, a count, a deadline or an outcome that disagrees with the
+Constitution or with the Record.** Where one does, that is a defect in the page and
+correcting it is operational. Changing what a page claims, what a template asks for, or
+what a workflow records or refuses — where the Record does not settle the answer — is an
+Ordinary resolution.
+
+**The Record is this repository.** Anything built to read it is a view, wherever it is
+hosted. Moving the Record itself would be a Layer 4 amendment.
+
+**Any member may say a change should have been a proposal, and saying so makes it one.** It
+waits; anything already merged is open to reversal by the same route. The judgement is not
+the mover's.
 
 ## Ends
 

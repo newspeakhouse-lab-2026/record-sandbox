@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Run check-record.py's date logic against known-bad input.
+
+check-record.py never fails a pull request, which is right: the tooling creates
+no duty. The consequence is that nothing about it is self-announcing — a check
+that silently stopped checking would look exactly like a Record with nothing
+wrong. This exercises the comparisons directly, and a failure HERE is a real
+failure.
+
+The one it exists for: an instrument's Ends: line states its instant twice, in
+words for a person and as a timestamp for the page. If the two disagree, one of
+them is wrong and nobody would notice from reading the rule.
+"""
+
+import importlib.util
+import re
+import os
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+# The filename has a hyphen, so it is not importable by name.
+_spec = importlib.util.spec_from_file_location("check_record", os.path.join(HERE, "check-record.py"))
+cr = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cr)
+
+UK = ZoneInfo("Europe/London")
+results = []
+
+
+def case(name, got, want, why):
+    bad = [] if got == want else [f"got {got!r}, want {want!r}"]
+    results.append((name, bad, why))
+    print(f"  {'FAIL' if bad else 'ok  '}  {name}")
+    for b in bad:
+        print(f"          {b}")
+    if bad:
+        print(f"          why this case exists: {why}")
+
+
+# ---- human_disagrees: the words against the timestamp ----------------------
+#
+# 30 November 2026 is a Monday, and the UK is on GMT by then.
+NOV30 = datetime(2026, 11, 30, 23, 59, tzinfo=UK)
+
+case("a line that agrees with itself raises nothing",
+     cr.human_disagrees("23:59 UK time, Monday 30 November 2026 ", NOV30), [],
+     "The ordinary case. If this warns, every correct instrument warns and the check is noise.")
+
+case("a wrong weekday is caught",
+     len(cr.human_disagrees("23:59 UK time, Tuesday 30 November 2026 ", NOV30)), 1,
+     "A date copied from elsewhere keeps its old weekday; the weekday is the cheapest tell.")
+
+case("a wrong date is caught",
+     len(cr.human_disagrees("23:59 UK time, Monday 29 November 2026 ", NOV30)), 1,
+     "The words and the timestamp naming different days is the defect this line exists to expose.")
+
+case("a wrong time is caught",
+     len(cr.human_disagrees("12:00 UK time, Monday 30 November 2026 ", NOV30)), 1,
+     "An hour's drift decides whether a position submitted at 23:30 was in time.")
+
+case("an empty words half raises nothing",
+     cr.human_disagrees("", NOV30), [],
+     "A bare timestamp has no words to disagree with it; absence is not a defect.")
+
+# A wrong date and a wrong time together: both reported, not just the first.
+case("two disagreements are both reported",
+     len(cr.human_disagrees("12:00 UK time, Monday 29 November 2026 ", NOV30)), 2,
+     "Reporting only the first sends someone back twice for one fix.")
+
+
+# ---- date_in: reading a wall-clock instant out of a quoted sentence --------
+case("a date with a time is read whole",
+     cr.date_in("expires at 23:59 on 30 November 2026"), (2026, 11, 30, 23, 59),
+     "docs/data.json's countdowns are checked against the sentence they were read from.")
+
+case("a date with no time reads as a date",
+     cr.date_in("on 2 November 2026"), (2026, 11, 2, None, None),
+     "Not every quoted deadline states a time, and inventing midnight would be inventing a deadline.")
+
+case("a sentence with no date reads as nothing",
+     cr.date_in("whenever everyone is ready"), None,
+     "A quote with no date must not be silently read as one.")
+
+case("a month that is not a month reads as nothing",
+     cr.date_in("30 Smarch 2026"), None,
+     "A typo in a month name must refuse rather than resolve to something.")
+
+
+# ---- the BST trap ---------------------------------------------------------
+#
+# The United Kingdom is on British Summer Time from late March to late October.
+# Writing Z for a summer date puts the deadline an hour out. That has happened
+# in this repository, which is why the offset check exists.
+def offset_wrong(stamp):
+    dt = datetime.fromisoformat(stamp)
+    return dt.utcoffset() != dt.replace(tzinfo=None).replace(tzinfo=UK).utcoffset()
+
+
+case("a summer date written +01:00 is accepted", offset_wrong("2026-10-04T23:59:00+01:00"), False,
+     "4 October is BST; +01:00 is correct and must not warn.")
+case("a summer date written Z is caught", offset_wrong("2026-10-04T23:59:00+00:00"), True,
+     "THE REGRESSION. Z on a summer date is the hour-out bug the check was written for.")
+case("a winter date written Z is accepted", offset_wrong("2026-11-30T23:59:00+00:00"), False,
+     "30 November is GMT; Z is correct there, so the check must not be a blanket ban.")
+case("a winter date written +01:00 is caught", offset_wrong("2026-11-30T23:59:00+01:00"), True,
+     "The same error in the other direction, which a rule copied from an October one would make.")
+
+
+# ---- the amendment record: §1's five fields ---------------------------------
+#
+# Check 6 had no coverage at all until now, which is how two defects survived in
+# it: it was gated on a written outcome, so a Tier A rule adopted by lazy
+# consensus (no result line, no objection) never reached it; and it sat after
+# tally.parse, which fails without a **Procedure:** line and skipped it.
+
+COMPLETE = """# Amendment record — PR #18: a rule
+
+**Procedure:** Tier A
+
+## Amendment record
+
+**How it was made:** Lazy consensus — no objection within 48 hours.
+**Assumptions:** That the house still has fourteen members.
+**Status:** live
+**Notes from the discussion:** Nobody argued against it.
+**Abstentions or objections:** None.
+"""
+
+case("a complete record reports nothing",
+     cr.amendment_record_gaps(COMPLETE), [],
+     "The ordinary case. If this warns, every correct file warns and the check is noise.")
+
+case("a missing section is distinguishable from a complete one",
+     cr.amendment_record_gaps("# Amendment record\n\n**Procedure:** Tier A\n"), None,
+     "None and [] are different defects: no section at all, versus a section with a gap. "
+     "Returning [] for both would report a file with no record as fully compliant.")
+
+# A blank record with NO result line: only the two always-required fields fire.
+# "How it was made" waits for a result; Notes and Abstentions are §1-conditional
+# ("Any ...") so blank is compliant and never warned.
+BLANK = (COMPLETE.replace(" Lazy consensus — no objection within 48 hours.", "")
+                 .replace(" That the house still has fourteen members.", "")
+                 .replace(" live", "").replace(" Nobody argued against it.", "")
+                 .replace(" None.", ""))
+case("an open record warns only about Assumptions and Status",
+     sorted(cr.amendment_record_gaps(BLANK, result_present=False)),
+     ["Assumptions", "Status"],
+     "§1 makes Notes and Abstentions conditional, so blank is compliant; How it was made is "
+     "not knowable until the vote closes. Warning on all five made the tooling stricter than "
+     "the Constitution and buried the real signal in noise.")
+
+case("once a result is written, How it was made is required too",
+     sorted(cr.amendment_record_gaps(BLANK, result_present=True)),
+     ["Assumptions", "How it was made", "Status"],
+     "After the outcome exists, a blank narrative of how the amendment was made is a genuine "
+     "gap — the same point at which check 4 begins to care.")
+
+case("Notes and Abstentions blank are never a gap",
+     cr.amendment_record_gaps(COMPLETE.replace(" Nobody argued against it.", "")
+                                       .replace(" None.", ""), result_present=True), [],
+     "Both begin with \"Any\" in §1 — where there are none, blank is the honest, compliant "
+     "answer, and the checker must not demand invented content.")
+
+case("a field left as the template's placeholder is not an answer",
+     cr.amendment_record_gaps(COMPLETE.replace("**Status:** live", "**Status:** <live, experimental, or archived>")),
+     ["Status"],
+     "The placeholder is text, so a naive emptiness test counts it as filled and the record "
+     "ships saying nothing.")
+
+case("an answer on the line below its label does not count",
+     cr.amendment_record_gaps(COMPLETE.replace("**Status:** live", "**Status:**\nlive")),
+     ["Status"],
+     "The regex requires text after the colon. Worth pinning, because it is the mistake the "
+     "pull request template invites if it stops saying so.")
+
+case("the pull request template's list-item form is not matched",
+     cr.amendment_record_gaps(COMPLETE.replace("**Status:** live", "- **Status:** live")),
+     ["Status"],
+     "The template used `- **Label:**` bullets while the checker anchors `^**Label:**`, so a "
+     "body copied across verbatim was reported incomplete on every bulleted field.")
+
+case("the section demoted to ### is not found",
+     cr.amendment_record_gaps(COMPLETE.replace("## Amendment record", "### Amendment record")), None,
+     "The heading is matched anchored at exactly `## `. Demoting it silently disables the check, "
+     "which is the same class of failure as the objection-check regression.")
+
+case("a later ## heading ends the section",
+     cr.amendment_record_gaps(COMPLETE + "\n## Objections\n\n**Status:** not this one\n"), [],
+     "The section terminates at the next `^## `. A field named below an unrelated heading must "
+     "not be read as answering this one.")
+
+# ---- scope: per-file checks warn only about files the PR changed ------------
+#
+# check-record globs the whole Record. A pull request touches a handful of files;
+# warning about the rest on every run trained people to ignore the annotations.
+# in_scope() gates the per-file checks on the CHANGED_FILES the workflow passes.
+case("an empty changed-set means scan everything (manual run / push)",
+     [cr.in_scope("amendment-record/pr-9.md", set()),
+      cr.in_scope("rules/rule-x.md", set())], [True, True],
+     "With no list given the script must behave as it always did, or a manual run "
+     "or a push would silently check nothing.")
+
+case("a file the PR did not change is out of scope",
+     cr.in_scope("amendment-record/pr-9.md", {"docs/index.html"}), False,
+     "The noise this fixes: a docs-only PR warning about an unrelated half-finished vote record.")
+
+case("a file the PR did change is in scope",
+     cr.in_scope("amendment-record/pr-9.md", {"amendment-record/pr-9.md", "docs/index.html"}), True,
+     "The file actually under review must still be checked.")
+
+
+# ---- the labels agree across every place that writes or reads a record -------
+#
+# There were independent copies of the field list and nothing pinning them. Two
+# of five had already drifted: the template said "Assumptions it rests on" and
+# "Explanatory notes from the discussion", so a body copied into the file was
+# reported incomplete on precisely those two.
+#
+# Since G the proposer no longer types the fields: `record-amendment.yml`
+# GENERATES them and `check-record.py` reads them back, so the coupling that
+# matters is generator-labels == checker-labels. vote.md still carries the full
+# set (it is the manual vote instrument), so it is pinned in full too. The PR
+# template now carries only the one field a human fills — Assumptions — so it is
+# pinned as a subset: every label it does carry must be one the checker knows.
+_amd = open(os.path.join(HERE, "..", "workflows", "record-amendment.yml"), encoding="utf-8").read()
+_absent = [f for f in cr.AMENDMENT_FIELDS if f"'{f}'" not in _amd]
+case("record-amendment.yml generates the checker's own five labels", _absent, [],
+     "The workflow writes the record and the checker reads it. If a label drifts between them, "
+     "every generated record reads as incomplete and the warning blames nobody who can fix it.")
+
+_vote = open(os.path.join(HERE, "..", "instrument-templates", "vote.md"), encoding="utf-8").read()
+_absent = [f for f in cr.AMENDMENT_FIELDS if f"**{f}:**" not in _vote]
+case("vote.md uses the checker's own five labels", _absent, [],
+     "The manual vote instrument carries the full field list; a label that drifts here makes a "
+     "record built from it read as incomplete.")
+
+_tmpl = open(os.path.join(HERE, "..", "pull_request_template.md"), encoding="utf-8").read()
+_tmpl_labels = re.findall(r"\*\*([^*]+?):\*\*", _tmpl)
+_unknown = [l for l in _tmpl_labels if l in {"How it was made", "Status",
+            "Notes from the discussion", "Abstentions or objections", "Assumptions"}
+            and l not in cr.AMENDMENT_FIELDS]
+case("every §1 label the PR template still carries is one the checker knows", _unknown, [],
+     "Since G the template carries only Assumptions; whatever §1 labels it does keep must match "
+     "the checker, or a value a proposer types lands under a label the checker ignores.")
+
+
+# ---- 7: an Emergency resolution's instrument ends within §2's seven days ----
+# The first real one, #45, merged with an Ends: line of 23:59 on 10 November.
+# Its vote closed 22:23:38Z on 3 November and it merged at 22:50:43Z, so seven
+# days ends at 22:23 or 22:50 depending on the reading -- and 23:59 is past both.
+_v45 = ("# Amendment record — PR #45\n\n**Procedure:** Emergency\n"
+        "**Closes:** 2026-11-03 06:30 UK (`2026-11-03T22:23:38Z`) — 12 hours after opening\n")
+_ends = lambda iso: f"# Rule\n\n**Ends:** some words (`{iso}`) — Emergency resolution (§2)\n"
+_g = cr.emergency_expiry_gaps(_v45, {"rules/rule-ration-club-events.md": _ends("2026-11-10T23:59:00+00:00")})
+case("#45 replayed: its Ends: line is past seven days from the close",
+     [(p, "22:23 UK time, Tuesday 10 November 2026" in m) for p, m in _g],
+     [("rules/rule-ration-club-events.md", True)],
+     "§2: an Emergency resolution expires after 7 days. The real rule claimed 96 minutes more.")
+case("an Ends: exactly seven days from the close is fine",
+     cr.emergency_expiry_gaps(_v45, {"r.md": _ends("2026-11-10T22:23:38+00:00")}), [],
+     "The limit itself is not late.")
+case("one second past it is not",
+     len(cr.emergency_expiry_gaps(_v45, {"r.md": _ends("2026-11-10T22:23:39+00:00")})), 1,
+     "A boundary that is off by one passes the real case and fails the edge.")
+case("the instant is compared, not the wording: +01:00 an hour earlier is fine",
+     cr.emergency_expiry_gaps(_v45, {"r.md": _ends("2026-11-10T23:23:00+01:00")}), [],
+     "Comparing strings would read 23:23 as later than 22:23.")
+case("an Emergency instrument with no Ends: line is named",
+     [("Ends" in m) for _, m in cr.emergency_expiry_gaps(_v45, {"r.md": "# Rule\n\nNo expiry here.\n"})], [True],
+     "Without the line its second clock is invisible on the dashboard.")
+case("a Tier C vote is not checked",
+     cr.emergency_expiry_gaps(_v45.replace("Emergency", "Tier C"), {"r.md": _ends("2027-01-01T00:00:00+00:00")}), [],
+     "Only §2's Emergency procedure expires after seven days.")
+case("guidance in a comment is not an Ends: line",
+     len(cr.emergency_expiry_gaps(_v45, {"r.md": "<!-- **Ends:** x (`2026-11-10T22:00:00+00:00`) -->\n"})), 1,
+     "A template's worked example is not a real expiry.")
+
+
+failed = [n for n, bad, _ in results if bad]
+print(f"\n{len(results) - len(failed)}/{len(results)} passed")
+sys.exit(1 if failed else 0)

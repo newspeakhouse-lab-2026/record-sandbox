@@ -16,8 +16,20 @@ on:
       - 'docs/**'
       - 'rules/**'
       - 'policies/**'
-      - 'votes/**'
+      - 'amendment-record/**'
       - '.github/workflows/label-proposals.yml'
+      # record-vote.yml was absent, so a pull request touching only it ran none
+      # of the tests written for it -- which is most of the suite.
+      - '.github/workflows/record-vote.yml'
+      - '.github/workflows/record-amendment.yml'
+      - '.github/workflows/objection-check.yml'
+      - '.github/workflows/check-record.yml'
+      # The template carries the five field labels check-record.py matches
+      # literally, and a test pins the two together. Without this line a pull
+      # request changing only the template could drift them with a green tick.
+      - '.github/pull_request_template.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/instrument-templates/**'
       - '.github/scripts/**'
   workflow_dispatch:
 
@@ -28,7 +40,21 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 so the base commit is present for the diff below.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The per-file checks warn only about files this pull request changed, so a
+      # run does not shout about the rest of the Record. Whole-Record checks (the
+      # data.json quotes and times) ignore this and always run. On anything that
+      # is not a pull request, CHANGED_FILES is unset and the script scans
+      # everything, as before.
+      - name: Collect the files this pull request changed
+        if: github.event_name == 'pull_request'
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          head='${{ github.event.pull_request.head.sha }}'
+          echo "CHANGED_FILES=$(git diff --name-only "$base" "$head" | tr '\n' ' ')" >> "$GITHUB_ENV"
       - run: python3 .github/scripts/check-record.py
 
       # The labelling workflow runs on pull_request_target, which GitHub always
@@ -45,6 +71,20 @@ jobs:
       - name: Test the vote arithmetic
         run: python3 .github/scripts/test-tally.py
 
+      # The Record check above never fails a pull request, which is right - but
+      # it means a check that silently stopped checking would look exactly like a
+      # Record with nothing wrong. This exercises its date comparisons directly,
+      # including the summer-time trap that has already put a deadline an hour
+      # out once, and a failure HERE is a real failure.
+      - name: Test the Record check's own date logic
+        run: python3 .github/scripts/test-check-record.py
+
+      # The merge block. What matters most here is that it does NOT fire at Tier C,
+      # Layer 3 or Layer 4, where §2 makes an objection countable rather than
+      # decisive - a check that blocked those would invent a veto.
+      - name: Test the objection merge block
+        run: node .github/scripts/test-objection-check.mjs
+
       # The dashboard reads a vote file too. Its reader is extracted from
       # index.html rather than copied, so a change to the page that broke the
       # reading would fail here rather than misreport a live vote.
@@ -58,3 +98,20 @@ jobs:
       # rather than resending stale bytes and erasing another member's row.
       - name: Test the vote-recording workflow's logic
         run: node .github/scripts/test-record-vote.mjs
+
+      # record-amendment.yml is the SECOND writer to a proposal's record file,
+      # and the hazard there is not the race — the Contents API sha serialises
+      # any number of writers. It is record-vote.yml's invariants: that workflow
+      # asserts nothing outside the voting member's own block has moved,
+      # including five exact header lines, so a careless second writer would not
+      # corrupt the file but WOULD make a voter's write fail and tell the voter
+      # their position was not recorded. These cases prove it touches one region.
+      - name: Test the amendment-record workflow's logic
+        run: node .github/scripts/test-record-amendment.mjs
+
+      # record-endorsement.yml triggers on `issues`, so like record-vote.yml it runs
+      # from the default branch and cannot be exercised by the pull request that
+      # changes it. Its suite existed but was never wired in here, so no pull
+      # request ever ran it.
+      - name: Test the endorsement workflow's logic
+        run: node .github/scripts/test-record-endorsement.mjs

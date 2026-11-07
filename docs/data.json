@@ -3,7 +3,7 @@
   "repo": "newspeakhouse-lab-2026/constitutional-record",
   "rounding": {
     "_comment": "Two rules, and they differ on an even roll. A named fraction rounds up: two-thirds of 14 is 10. A majority is more than half: majority of 14 is 8, not 7, so a 7-7 split fails. Using ceil for a majority is the bug that passes a tie.",
-    "source": "§2",
+    "source": "§1",
     "quote": "For any threshold stated as a fraction of all members, fractions round up to the next whole member."
   },
   "procedures": {
@@ -30,7 +30,8 @@
       "name": "Policy",
       "days": 7,
       "source": "§2",
-      "quote": "Seven-day deliberation."
+      "quote": "Seven-day deliberation.",
+      "needsApprovals": 1
     },
     "layer-4": {
       "name": "Amendment",
@@ -38,6 +39,12 @@
       "needsApprovals": 2,
       "source": "§2",
       "quote": "Two endorsing reviews start the 7-day deliberation clock."
+    },
+    "emergency": {
+      "name": "Emergency",
+      "days": 0.5,
+      "source": "§2",
+      "quote": "Requires a majority of those who vote within 12 hours, quorum of half."
     }
   },
   "thresholds": {
@@ -153,13 +160,6 @@
       "source": "§5",
       "quote": "no later than Monday, 23 November 2026",
       "note": "A re-ratification or replacement proposal must have obtained its endorsements and entered seven-day deliberation."
-    },
-    {
-      "label": "Interim role holders' terms end",
-      "at": "2026-11-02T23:59:00Z",
-      "source": "§6",
-      "quote": "extended to 23:59 (UK time) on Monday, 2 November 2026",
-      "note": "Ends earlier if holders are elected under §3.2. Record Keepers are the only members with merge access, so this date is the one the rest depend on."
     }
   ]
 }

@@ -6,14 +6,17 @@ says the tooling creates no duty, and an amendment is valid whatever our JSON
 happens to contain. The job is to tell whoever is amending the Constitution,
 at the moment they amend it, that something else needs updating too.
 
-Five checks:
+Seven checks:
   1. Every sentence docs/data.json quotes still appears in constitution.md.
   2. Every instant agrees with the wall-clock time its own quote states.
   3. Every instrument that expires declares it in a form the page can read.
   4. Every vote's written result still matches its own rows.
   5. Every vote that restarted records what the earlier round decided.
+  6. Every recorded outcome carries the amendment record §1 requires.
+  7. An Emergency resolution's instrument ends within §2's seven days.
 """
-import json, re, sys, glob
+from datetime import timedelta
+import json, os, re, sys, glob
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -71,6 +74,106 @@ def human_disagrees(words, dt):
             out.append(f"the Ends: line says {w.group(1)} but "
                        f"{dt.date().isoformat()} is a {actual.capitalize()}.")
     return out
+
+
+# All five §1 fields, kept here because the template and vote.md carry all five
+# and a test pins the three copies together. Which of them this checker REQUIRES
+# is narrower, and deliberately so -- see below.
+AMENDMENT_FIELDS = ["How it was made", "Assumptions", "Status",
+                    "Notes from the discussion", "Abstentions or objections"]
+
+# §1 lists six things an amendment "shall be recorded with". Two begin with
+# "Any" -- explanatory notes, abstentions or objections -- and are conditional:
+# where there are none, blank is already compliant, so this checker does not ask
+# for them. Of the unconditional three (date is the commit timestamp), Assumptions
+# and Status can be set the moment a proposal is written; "How it was made" cannot,
+# because the fact -- by lazy consensus, or by a vote of N -- does not exist until
+# the outcome does. So it is required only once a result has been written, the
+# same way check 4 waits for a stated result rather than warning on an open vote.
+AMENDMENT_REQUIRED_ALWAYS = ["Assumptions", "Status"]
+AMENDMENT_REQUIRED_AT_RESULT = ["How it was made"]
+
+
+def amendment_record_gaps(text, result_present=False):
+    """Which REQUIRED §1 fields a record file leaves unanswered.
+
+    Returns None when there is no `## Amendment record` section at all (a
+    different defect from a gap within one), and [] when every required field is
+    answered. `result_present` adds "How it was made" to the required set, since
+    it is only knowable once the vote has closed.
+
+    The heading must be exactly `## Amendment record`, matched anchored and
+    terminating at the next `^## `, so the section may sit anywhere among the
+    file's headings but may not be demoted to `###` or renamed.
+    """
+    clean = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    sec = re.search(r"^## Amendment record\s*$(.*?)(?=^## |\Z)", clean, re.M | re.S)
+    if not sec:
+        return None
+    body = sec.group(1)
+    required = AMENDMENT_REQUIRED_ALWAYS + (AMENDMENT_REQUIRED_AT_RESULT if result_present else [])
+    # Blank, or still carrying the template's <angle-bracket> placeholder.
+    return [f for f in required
+            if not re.search(r"^\*\*" + re.escape(f) + r":\*\*[^\S\n]*(\S.*)$", body, re.M)
+            or re.search(r"^\*\*" + re.escape(f) + r":\*\*[^\S\n]*<", body, re.M)]
+
+
+def emergency_expiry_gaps(vote_text, instruments):
+    """Instruments in an Emergency resolution that claim force past §2's seven days.
+
+    §2: an Emergency resolution "expires after 7 days unless confirmed". Whether the
+    seven days run from the vote closing or from the merge, the Record has not
+    settled; a merge always comes after the close, so the close plus seven days is
+    the one limit that is late under neither reading. `vote_text` is the proposal's
+    amendment-record file; `instruments` maps each instrument it changes to its
+    text. Returns (path, message) pairs. Nothing for a vote that is not an Emergency
+    one, or whose Closes line cannot be read -- that is check 4's to say.
+    """
+    clean = re.sub(r"<!--.*?-->", "", vote_text, flags=re.S)
+    if not re.search(r"^\*\*Procedure:\*\*[^\S\n]*Emergency\b", clean, re.M | re.I):
+        return []
+    c = re.search(r"^\*\*Closes:\*\*[^\n]*?`([^`]+)`", clean, re.M)
+    try:
+        closes = datetime.fromisoformat(c.group(1)) if c else None
+    except ValueError:
+        closes = None
+    if closes is None or closes.utcoffset() is None:
+        return []
+    limit = closes + timedelta(days=7)
+    said = lambda d: d.astimezone(UK).strftime("%H:%M UK time, %A %-d %B %Y")
+    out = []
+    for path, text in sorted(instruments.items()):
+        t = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+        line = re.search(r"^\*\*Ends:\*\*[^\S\n]*(.+)$", t, re.M)
+        bt = re.search(r"`([^`]+)`", line.group(1)) if line else None
+        if not bt:
+            out.append((path, "this is an Emergency resolution's instrument and has no readable Ends: line. "
+                              f"\u00a72: it \"expires after 7 days unless confirmed\". Its vote closes {said(closes)}, "
+                              f"so it ends no later than {said(limit)}."))
+            continue
+        try:
+            ends = datetime.fromisoformat(bt.group(1))
+        except ValueError:
+            continue  # check 3 already says it cannot be read
+        if ends.utcoffset() is not None and ends > limit:
+            out.append((path, f"the Ends: line runs to {said(ends)}, later than \u00a72 allows an Emergency "
+                              f"resolution. Its vote closes {said(closes)}, and seven days from then is "
+                              f"{said(limit)}. Whether the seven days run from the close or from the merge is "
+                              "not settled by the Record, but a merge is never earlier than the close, so "
+                              "that instant is the one that is late under neither reading."))
+    return out
+
+
+# A pull request touches a handful of files; warning about the rest of the Record
+# on every run trained people to ignore the annotations. The workflow passes the
+# PR's changed files in CHANGED_FILES; the per-file checks (3, 4, 5, 6) warn only
+# about those. The whole-Record checks (1, 2) ignore this and always run. An empty
+# set -- a manual run, or a push -- means scan everything, as before.
+CHANGED = set(filter(None, (os.environ.get("CHANGED_FILES") or "").split()))
+
+
+def in_scope(path, changed=CHANGED):
+    return (not changed) or (path in changed)
 
 
 def read(path):
@@ -131,7 +234,7 @@ def main():
                  f"Check the UTC offset: the UK is on BST from late March to late October.")
 
     # 3 — instruments that expire should say so in a form the page can read
-    for path in sorted(glob.glob("rules/*.md") + glob.glob("policies/*/*.md")):
+    for path in sorted(p for p in glob.glob("rules/*.md") + glob.glob("policies/*/*.md") if in_scope(p)):
         if path.endswith("rationale.md"):
             continue
         text = open(path).read()
@@ -182,17 +285,49 @@ def main():
     # only makes a disagreement visible, because the likeliest failure here is
     # two people counting Tier C differently in good faith, not an attack.
     import tally
-    for path in sorted(glob.glob("votes/*.md")):
+    for path in sorted(p for p in glob.glob("amendment-record/*.md") if in_scope(p)):
         text = read(path)
         if text is None:
             continue
+        clean = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+        # 6 -- §1 requires five things recorded for EVERY amendment to the
+        # Constitution or a rule, with no exception for the ones that passed
+        # quietly. A file in this directory is a proposal being recorded, so the
+        # section is checked on the file existing -- not on an outcome being
+        # written. Gating it on an outcome missed the commonest case entirely: a
+        # Tier A rule adopted by lazy consensus has no result line and no
+        # objection, so a wholly blank record passed unremarked.
+        #
+        # Checked BEFORE tally.parse, because parse fails without a
+        # **Procedure:** line and the old order then skipped straight past this
+        # -- disabling the check on exactly the files it exists for.
+        #
+        # The pull request description asks for the same five and a workflow
+        # copies them here. The description is not lost -- GitHub keeps it, with
+        # an edit history -- but `git clone` retrieves no descriptions, and §1
+        # ties the record's date to the commit timestamp. Warns, like everything
+        # here: the tooling creates no duty, and §1 binds whether or not this
+        # file notices.
+        result_present = bool(re.search(r"^\*\*(Carried|Did not carry)\b", clean, re.M))
+        missing = amendment_record_gaps(text, result_present)
+        if missing is None:
+            warn(path, "this has no `## Amendment record` section. \u00a71 asks every amendment to "
+                       "record how it was made, its assumptions and its status. "
+                       "`.github/instrument-templates/vote.md` has the section.")
+        elif missing:
+            warn(path, "the `## Amendment record` is incomplete \u2014 " + ", ".join(missing)
+                       + (" is" if len(missing) == 1 else " are") + " still blank or still the "
+                       "template's placeholder. \u00a71 asks for each of them before this merges.")
+
         parsed, err = tally.parse(text)
         if err:
             warn(path, f"this vote cannot be recounted: {err}")
             continue
         got = tally.tally(parsed["procedure"], parsed["roll"], parsed["counts"],
-                          data.get("thresholds", {}), parsed["excluded"])
-        clean = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+                          data.get("thresholds", {}), parsed["excluded"],
+                          no_vote=not parsed.get("holdsVote", True),
+                          objections=parsed.get("objections") or ())
         # A restart means a round closed. If its outcome was never written into
         # Earlier rounds, it survives only in git history — which is still the
         # Record, but nothing on the page or in this file can say what happened.
@@ -204,6 +339,16 @@ def main():
         if not stated:
             continue  # no result written yet: an open vote, not a defect
         said = stated.group(1) == "Carried"
+        if got.get("verdict") == "no-vote":
+            # §2: a single stated objection blocks lazy consensus and moves the
+            # proposal up a tier. A file recording both an objection and a pass
+            # is the one contradiction that matters at these tiers.
+            if said and got.get("objections"):
+                who = ", ".join(n for n, _ in got["objections"])
+                warn(path, f'the result says "Carried" but this file records an objection from {who}. '
+                           "At Tier A and Tier B a single stated objection blocks lazy consensus and moves "
+                           "the proposal up a tier (\u00a72), so one of the two is wrong.")
+            continue
         if got.get("verdict") == "none":
             warn(path, f'the result says "{stated.group(1)}", but {got["note"]} for this procedure, '
                        f"so no arithmetic can confirm it. Record who decided and on what reading.")
@@ -212,6 +357,21 @@ def main():
                        f'"{"Carried" if got["carried"] else "Did not carry"}" — '
                        f"{got['counts']['preference']} preference of {got.get('denominator')}, "
                        f"needed {got.get('required')}. One of the two is wrong.")
+
+    # 7 -- an Emergency resolution expires after seven days (\u00a72), and its
+    # instrument is what says so. Only within a pull request, which is the one
+    # place a vote file and the instruments it decides are known to belong
+    # together: a whole-Record scan has no link between pr-N.md and a rule.
+    if CHANGED:
+        inst = {p: read(p) for p in CHANGED
+                if re.match(r"^(rules/[^/]+|policies/[^/]+/[^/]+)\.md$", p)
+                and not p.endswith("rationale.md") and read(p) is not None}
+        for vp in sorted(p for p in CHANGED if re.match(r"^amendment-record/pr-\d+\.md$", p)):
+            vt = read(vp)
+            if vt is None:
+                continue
+            for path, msg in emergency_expiry_gaps(vt, inst):
+                warn(path, msg)
 
     print(f"\n{len(warnings)} warning(s).")
     summary = __import__("os").environ.get("GITHUB_STEP_SUMMARY")

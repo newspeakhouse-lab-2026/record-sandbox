@@ -6,19 +6,20 @@
  * the page reads that number and counts rows. This test therefore checks
  * counting and reading, not thresholds — those are tested in test-tally.py.
  *
- * voteOf is read out of docs/index.html rather than copied, so the two cannot
- * drift. A failure here means the page would misreport a live vote.
+ * voteOf is read out of docs/record.js rather than copied, so the page and the
+ * counter cannot drift. A failure here means the page would misreport a live
+ * vote.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const html = readFileSync(join(HERE, '..', '..', 'docs', 'index.html'), 'utf8');
+const html = readFileSync(join(HERE, '..', '..', 'docs', 'record.js'), 'utf8');
 
 const m = html.match(/\/\* ---8<---[\s\S]*?--->8--- end[^\n]*\n/);
 if (!m) {
-  console.error('could not find the ---8<--- region in docs/index.html. If it was renamed, rename it here too.');
+  console.error('could not find the ---8<--- region in docs/record.js. If it moved, point this at its new home.');
   process.exit(1);
 }
 const { POS, requiredFor, voteOf } = new Function(m[0] + '\nreturn {POS, requiredFor, voteOf};')();
@@ -174,6 +175,225 @@ const orphan = voteOf([
   '| Member | Position | Date |', '|---|---|---|', '| A | — | |',
 ].join('\n'));
 check('a restart implies at least two rounds', orphan.rounds, 2);
+
+/* Tier A and Tier B hold no vote (§2), so their files have no table. voteOf
+   used to return null for any table-less file, which is why the one place an
+   objection is decisive was the one place the page could show nothing. Same
+   cases as the Python tally, from the same file. */
+function noVoteFixture(c) {
+  const out = [`# Objections — PR #1: fixture`, '', `**Procedure:** ${c.procedure}`, ''];
+  if (c.table) {
+    out.push('| Member | Position | Date |', '|---|---|---|', '| M1 | objection | 2026-10-07 |');
+    for (let i = 2; i <= 14; i++) out.push(`| M${i} | — | |`);
+    out.push('');
+  }
+  out.push('## Objections', '');
+  for (const o of c.objections) out.push(`**${o.name}** — ${o.date}`, '', '> Reason: fixture.', '>',
+    '> Route forward: fixture.', '');
+  /* A Notes block of the same shape, present in every fixture: counting it as
+     an objection is the mistake the section bound exists to prevent. */
+  out.push('## Notes', '', '**M9** — 2026-10-07', '', '> Fixture note.', '');
+  return out.join('\n');
+}
+for (const c of (corpus.noVoteCases || [])) {
+  const v = voteOf(noVoteFixture(c));
+  check(`no vote: ${c.name}`,
+    v === null ? 'returned null' : [v.holdsVote, v.objections.length],
+    [c.expect.holdsVote, c.expect.objections]);
+}
+
+/* Who answered and how. The counts alone cannot answer "who still needs
+   asking", and that is the question the row is most often opened for. */
+const whoVoted = voteOf([
+  '**Procedure:** Layer 3 Policy',
+  '**Carries if:** a majority of all members — **2 of 3**',
+  '| Member | Position | Date |', '|---|---|---|',
+  '| Ada | preference | 2026-10-07 |',
+  '| Blaise | objection | 2026-10-08 |',
+  '| Carl | — | |',
+].join('\n'));
+check('every member is listed, answered or not', whoVoted.members.length, 3);
+check('with the position each took',
+  whoVoted.members.map(m => m.position), ['preference', 'objection', null]);
+check('and the count of the unanswered still agrees', whoVoted.awaiting, ['Carl']);
+check('the date each answered is kept',
+  whoVoted.members[1].date, '2026-10-08');
+
+/* ---- four defects the final review found in this region ------------------ */
+
+/* Invalid Date is truthy, so `vote.closes || win.closes` picked it and the
+   "window is over" test became NaN <= n. A closed vote kept a live button and
+   the workflow then refused the member. */
+const badDate = voteOf(['**Carries if:** a majority of all members — **8 of 14**',
+  '**Closes:** Monday 6 October 2026 (`6 October 2026 at noon`)',
+  '| Member | Position | Date |', '|---|---|---|', '| A | preference | x |'].join('\n'));
+check('an unreadable Closes gives no date', badDate.closes, null);
+check('and is reported rather than swallowed', badDate.badCloses, true);
+const goodDate = voteOf(['**Carries if:** a majority of all members — **8 of 14**',
+  '**Closes:** Monday 6 October 2026 (`2026-10-06T12:00:00+01:00`)',
+  '| Member | Position | Date |', '|---|---|---|', '| A | preference | x |'].join('\n'));
+check('a readable Closes still parses', !!goodDate.closes && !goodDate.badCloses, true);
+
+/* An en dash is the easier Mac keystroke (alt-hyphen) and erased every
+   objection, while the row's own tag still said OBJECTED. */
+for (const [name, dash] of [['em dash', '\u2014'], ['en dash', '\u2013'], ['hyphen', '-']]) {
+  const v = voteOf(['**Procedure:** Tier A', '', '## Objections', '',
+    `**Ada Lovelace** ${dash} 2026-10-07`, '', '> Reason: x'].join('\n'));
+  check(`an objection dated with an ${name} is counted`, v.objections.length, 1);
+}
+
+/* The scan ran to the end of the file, so a comparison table under ## Notes --
+   which the template invites -- was counted into the roll and the affirmative
+   total. */
+const oneTable = ['**Carries if:** a majority of all members — **8 of 14**',
+  '| Member | Position | Date |', '|---|---|---|',
+  '| A | preference | x |', '| B | — | |'].join('\n');
+check('one table counts one table', [voteOf(oneTable).roll, voteOf(oneTable).counts.preference], [2, 1]);
+const plusNotes = voteOf(oneTable + '\n\n## Notes\n\n| x | y |\n|---|---|\n| C | preference |\n');
+check('a second table under Notes is not the vote', [plusNotes.roll, plusNotes.counts.preference], [2, 1]);
+
+/* Testing for the word "quorum" matched it inside a negation, rendering a
+   Layer 3 row as Tier C and hiding the affirmative count. */
+const q = c => voteOf(['**Carries if:** ' + c, '| Member | Position | Date |', '|---|---|---|',
+  '| A | preference | x |'].join('\n')).quorumOnly;
+check('a stated quorum figure is a quorum',
+  q('a simple majority of those who vote — quorum **7 of 14**'), true);
+check('so is the "quorum of" spelling', q('with a quorum of **7 of 14**'), true);
+check('a NEGATED quorum is not a quorum',
+  q('a majority of all members, with no quorum requirement — **8 of 14**'), false);
+check('and Layer 4 is not a quorum',
+  q('affirmative support from two-thirds of all members — **10 of 14**'), false);
+
+/* ---- voteFileFor: opening a vote must not destroy the §1 record -----------
+ *
+ * It sits outside the ---8<--- region, so it was untested. Since
+ * record-amendment.yml began writing the record as soon as a proposer fills it
+ * in, a proposal that votes usually HAS a file by the time anyone opens the
+ * vote — and voteOf returns null for a file holding only that record, so the row
+ * renders as "no vote yet". The old voteFileFor built the whole file and the
+ * page pointed GitHub's /new/ editor at a path that already existed.
+ */
+const SANDBOX = {
+  document: {}, window: {}, localStorage: { getItem: () => null, setItem: () => {} },
+  atob: x => Buffer.from(x, 'base64').toString('binary'), TextDecoder,
+};
+const { voteFileFor, windowOf, carriesLine, rem } = new Function(...Object.keys(SANDBOX),
+  readFileSync(join(HERE, '..', '..', 'docs', 'record.js'), 'utf8') + '\nreturn {voteFileFor, windowOf, carriesLine, rem};'
+)(...Object.values(SANDBOX));
+
+const THR = { 'tier-c': { name: 'Tier C', words: 'a simple majority of those voting',
+  over: 'voting', quorum: { num: 1, den: 2 } } };
+const PR = { number: 18, title: 'a proposal', head: { ref: 'a-branch' } };
+/* ukStamp takes a Date, which is what windowOf hands it. */
+const WIN = { tier: 'c', layer: '2',
+  opened: new Date('2026-05-31T10:00:00Z'), closes: new Date('2099-01-01T12:00:00Z') };
+const NAMES = ['Ada Lovelace', 'Blaise Pascal'];
+
+const fresh = voteFileFor(PR, WIN, THR, NAMES, 'abcdef1234', null);
+check('with no file, a whole one is built', typeof fresh, 'string');
+check('titled for the record, not for a vote',
+  fresh.startsWith('# Amendment record — PR #18: a proposal'), true);
+check('and it carries an Amendment record heading for the workflow to fill',
+  /^## Amendment record$/m.test(fresh), true);
+check('whose body is empty, so the workflow does not read it as hand-written',
+  fresh.split(/^## Amendment record$/m)[1].replace(/<!--[\s\S]*?-->/g, '').split(/^## /m)[0].trim(), '');
+
+const EXISTING = ['# Amendment record — PR #18: a proposal', '',
+  '**Procedure:** Tier A', '',
+  '## Amendment record', '',
+  '<!-- amendment-record: copied from the pull request description -->',
+  '**How it was made:** Lazy consensus — no objection within 48 hours.',
+  '**Status:** live',
+  '<!-- /amendment-record -->', ''].join('\n');
+
+const spliced = voteFileFor(PR, WIN, THR, NAMES, 'abcdef1234', EXISTING);
+check('with a file, the roll is spliced in rather than replacing it',
+  spliced.includes('| Ada Lovelace | — | |'), true);
+check('the §1 record survives verbatim',
+  spliced.includes('**How it was made:** Lazy consensus — no objection within 48 hours.'), true);
+check('and so do the workflow\'s anchors, so it can still update it',
+  [spliced.includes('<!-- amendment-record: copied from the pull request description -->'),
+   spliced.includes('<!-- /amendment-record -->')], [true, true]);
+check('the Procedure line becomes the procedure that votes',
+  /^\*\*Procedure:\*\* Tier C$/m.test(spliced), true);
+check('and Tier A is gone, because opening a vote is when that changes',
+  /^\*\*Procedure:\*\* Tier A$/m.test(spliced), false);
+check('the other four header lines are added',
+  ['**Carries if:**', '**Opened:**', '**Closes:**', '**Entitled to vote:**']
+    .every(h => spliced.includes(h)), true);
+check('Result and Objections are added once each',
+  [(spliced.match(/^## Result$/gm) || []).length, (spliced.match(/^## Objections$/gm) || []).length],
+  [1, 1]);
+check('exactly one table, which is the roll',
+  (spliced.match(/^\|---/gm) || []).length, 1);
+/* voteOf and tally.py both scan for the FIRST table and read the roll out of
+   it. A second one anywhere above it would be read as the roll. */
+check('and the roll is still what voteOf finds',
+  (voteOf(spliced).members || []).map(x => x.name || x), NAMES);
+
+const twice = voteFileFor(PR, WIN, THR, NAMES, 'abcdef1234', spliced);
+check('splicing an already-spliced file does not duplicate the roll',
+  (twice.match(/^\|---/gm) || []).length, 1);
+check('nor the sections',
+  [(twice.match(/^## Result$/gm) || []).length, (twice.match(/^## Objections$/gm) || []).length],
+  [1, 1]);
+
+/* ---- Emergency resolutions (§2) ------------------------------------------
+ * The first real one, #45, carried the labels layer-2 and opened:…, and no
+ * tier: the page had no procedure for it, so no countdown and no vote button.
+ * These run on the REAL data.json, so a procedure or threshold edited there is
+ * what is tested. */
+const CFG = JSON.parse(readFileSync(join(HERE, '..', '..', 'docs', 'data.json'), 'utf8'));
+const lab = (...xs) => xs.map(name => ({ name }));
+const OPENED = new Date(Date.now() - 3 * 36e5).toISOString().replace(/\.\d+Z$/, 'Z');
+const P45 = { number: 45, draft: false, title: '[EMERGENCY] Rule (Layer 2): Ration Club third-party events',
+  head: { ref: 'ration-club-events' }, labels: lab('layer-2', 'emergency', `opened:${OPENED}`) };
+
+let w = windowOf(P45, CFG.procedures);
+check('an emergency row has a window, twelve hours from opening',
+  { state: w.state, emergency: w.emergency, hours: (w.closes - w.opened) / 36e5, minimum: w.minimum },
+  { state: 'open', emergency: true, hours: 12, minimum: false });
+check('and the label is not shown again as a stray tag', w.other, []);
+w = windowOf({ ...P45, labels: lab('layer-2', `opened:${OPENED}`) }, CFG.procedures);
+check('without the label it is what #45 was: no tier recorded, no clock',
+  { state: w.state, closes: w.closes }, { state: 'no-tier', closes: null });
+w = windowOf({ ...P45, labels: lab('emergency', `opened:${OPENED}`) }, CFG.procedures);
+check('an emergency with no layer still gets its window', w.state === 'open' && !!w.closes, true);
+w = windowOf({ ...P45, labels: lab('layer-3', 'emergency', `opened:${OPENED}`) }, CFG.procedures);
+check('an emergency at Layer 3 waits for no endorsement',
+  { state: w.state, endorse: w.endorse || null }, { state: 'open', endorse: null });
+w = windowOf({ ...P45, draft: true }, CFG.procedures);
+check('a draft emergency is still a draft', w.state, 'draft');
+w = windowOf({ ...P45, labels: lab('layer-2', 'emergency') }, CFG.procedures);
+check('with no opened: label it says so, rather than inventing a start', w.state, 'unopened');
+
+const N14 = Array.from({ length: 14 }, (_, i) => `Member ${String.fromCharCode(65 + i)}`);
+const W45 = windowOf(P45, CFG.procedures);
+const e = voteFileFor(P45, W45, CFG.thresholds, N14, 'a967d78abc', null);
+check('an emergency vote can be opened', typeof e, 'string');
+check('its Procedure line is the one tally.py reads', /^\*\*Procedure:\*\* Emergency$/m.test(e), true);
+/* The bug this branch exists for: the generic branch printed a majority of ALL
+   members, "8 of 14", as the bar. §2 says a majority of those who vote. */
+check('Carries if states the quorum, 7 of 14, and not a pass mark of 8',
+  [/quorum \*\*7 of 14\*\*/.test(e), /\*\*8 of 14\*\*/.test(e)], [true, false]);
+check('and says both readings will be counted',
+  /under both readings once the window has closed/.test(e), true);
+check('voteOf reads that 7 as a quorum, not as votes needed',
+  (() => { const v = voteOf(e); return { quorumOnly: v.quorumOnly, roll: v.roll, procedure: v.procedure }; })(),
+  { quorumOnly: true, roll: 14, procedure: 'Emergency' });
+check('its Closes line is twelve hours after its Opened line',
+  (() => { const t = l => new Date(e.match(new RegExp(`^\\*\\*${l}:\\*\\*[^\\n]*?\`([^\`]+)\``, 'm'))[1]);
+           return (t('Closes') - t('Opened')) / 36e5; })(), 12);
+check('the shared Carries line is the Tier C one for Tier C, unchanged',
+  carriesLine(CFG.thresholds['tier-c'], 14),
+  'a simple majority of those who vote, with a quorum of half of all members — quorum **7 of 14**; the majority is counted over preference and objection only, once the window has closed');
+check('and the fraction one for Layer 4, unchanged',
+  carriesLine(CFG.thresholds['layer-4'], 14), 'affirmative support from two-thirds of all members — **10 of 14**');
+
+check('the countdown shows minutes in the last hour',
+  rem(new Date(Date.now() + 42 * 6e4 + 3e4)).txt, '42m');
+check('and hours above it', rem(new Date(Date.now() + 11.5 * 36e5)).txt, '11h');
+
 
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} passed`);

@@ -1,0 +1,600 @@
+# Copies the `## Amendment record` section of a pull request's description into
+# amendment-record/pr-{number}.md on the proposal's own branch, so that the
+# record Constitution §1 requires merges along with the text it records.
+#
+#   WHY BEFORE MERGE, ON THE BRANCH. A GitHub merge commit carries the pull
+#   request's title and not its body, so a post-merge copy would have to recover
+#   a description the commit does not reference. And ruleset-main.json lists
+#   OrganizationAdmin as its only bypass actor, so GITHUB_TOKEN cannot write to
+#   main at all — a post-merge writer would need an exception to the rule that
+#   confines merging to the Record Keepers. Writing to the branch needs no
+#   exception, and the file arrives in the diff somebody reviews.
+#
+#   NO concurrency: GROUP, for the reason record-vote.yml gives for having none.
+#   GitHub keeps at most one PENDING run per group and cancels the earlier one
+#   when a newer arrives, regardless of cancel-in-progress — it is not a queue.
+#   A burst of description edits would silently drop all but the last. The mutex
+#   is the Contents API sha, and the retry below re-reads on every attempt.
+#
+#   IT WRITES ONE REGION AND NOTHING ELSE. record-vote.yml asserts, before every
+#   write, that nothing outside the voting member's own block has moved —
+#   including five exact header lines, byte for byte. A second writer that
+#   touched those would not corrupt the file: it would make a VOTER's write fail
+#   its invariants, and tell the voter their position was not recorded. So this
+#   confines itself to a paired-anchor region inside `## Amendment record`, and
+#   refuses rather than guessing when it cannot find it.
+#
+#   IT COMPOSES NOTHING. The five fields are copied verbatim from what the
+#   author wrote, the run is triggered by the author's own edit, and the commit
+#   is authored by them. AGENTS.md forbids an agent composing or inferring a
+#   member's position; this transcribes text a member typed, which is what
+#   record-vote.yml already does with a vote form.
+#
+#   Unlike record-vote.yml (which triggers on `issues`) and
+#   label-proposals.yml (which uses `pull_request_target`), this triggers on
+#   `pull_request` and so runs the version in the pull request that changes it.
+#   It can be exercised by its own proposal.
+
+name: Record the amendment record
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, ready_for_review]
+  # Also on an endorse ISSUE opening: an endorsement-gated tier (Layer 3/4) builds
+  # its roll only once its endorsements are in, and the endorse form is a human-
+  # opened issue, so it re-triggers this workflow. A GITHUB_TOKEN repository_dispatch
+  # would NOT (the same loop-prevention that stops a bot label-add cascading), so
+  # this listens for the human event directly. record-endorsement.yml handles the
+  # same event to record the endorsement and reply to the endorser.
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read        # the gate recount reads the endorse-ISSUE trail (issues.listForRepo)
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const DEFAULT_BRANCH = context.payload.repository.default_branch;
+
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+            const skip = m => { core.notice(m); return null; };
+
+            /* The pull request this run is about. On a pull_request event it is in
+               the payload. On an endorse-issue opening it is named in the form, so
+               it is resolved here — an endorsement can be the Nth that starts a
+               gated clock, and the roll must be built on that same human event
+               (a GITHUB_TOKEN dispatch would not re-trigger a workflow). */
+            let pr;
+            if (context.eventName === 'issues') {
+              const issue = context.payload.issue;
+              if (!issue || issue.pull_request) return skip('not an endorsement issue.');
+              const isEndorse = (issue.labels || []).map(l => (l && l.name) || l).includes('endorse')
+                || /^Endorse:\s*PR\s*#/i.test(issue.title || '');
+              if (!isEndorse) return skip('not an endorsement issue.');
+              const prOf = b => {
+                for (const chunk of String(b || '').split(/^### /m).slice(1)) {
+                  const nl = chunk.indexOf('\n'); if (nl < 0) continue;
+                  if (chunk.slice(0, nl).trim() === 'Pull request number') {
+                    const mx = chunk.slice(nl).trim().match(/^#?(\d{1,6})$/);
+                    return mx ? Number(mx[1]) : null;
+                  }
+                }
+                return null;
+              };
+              const num = prOf(issue.body);
+              if (!num) return skip('endorse issue carries no readable pull request number.');
+              try { pr = (await github.rest.pulls.get({ owner, repo, pull_number: num })).data; }
+              catch (e) { return skip(`could not read PR #${num} for the endorsement: ${e.message}. A later event will try again.`); }
+            } else {
+              pr = context.payload.pull_request;
+            }
+            const n = pr.number;
+
+            /* ---- guards, before anything is built ---------------------------
+               Each of these is a reason not to write, not a defect. They are
+               notices rather than failures: a proposal is not wrong for being a
+               draft, and a red check here would read as a problem with the
+               proposal. */
+            if (pr.state !== 'open' || pr.merged) return skip('not an open pull request.');
+            const branch = pr.head && pr.head.ref;
+            const headRepo = pr.head && pr.head.repo && pr.head.repo.full_name;
+            if (!branch) return skip('no head branch.');
+            if (headRepo !== `${owner}/${repo}`) {
+              return skip(`head is on ${headRepo}, not this repository. A token cannot write to a fork.`);
+            }
+            if (branch === DEFAULT_BRANCH) {
+              return skip(`head is ${DEFAULT_BRANCH}; this never writes to the default branch.`);
+            }
+
+            const path = `amendment-record/pr-${n}.md`;
+            /* A self-check on a path this workflow just built from the pull
+               request number. Belt and braces against the builder drifting. */
+            if (!/^amendment-record\/pr-[1-9]\d{0,5}\.md$/.test(path)) {
+              core.setFailed(`This workflow built the path ${path}, which it will not write to.`);
+              return;
+            }
+
+            /* ---- what the author wrote --------------------------------------
+               The same field reader label-proposals.yml uses, for the same
+               reason: anchored to one line, because \s would span newlines and a
+               blank field followed by prose starting with a digit would be read
+               as the answer. */
+            const body = pr.body || '';
+            const H = '[^\\S\\n]*';
+            const field = (label, capture) =>
+              (body.match(new RegExp(`^${H}\\*\\*${label}:\\*\\*${H}\\**${H}(${capture})`, 'im')) || [])[1];
+
+            const FIELDS = ['How it was made', 'Assumptions', 'Status',
+                            'Notes from the discussion', 'Abstentions or objections'];
+
+            // Layer and tier decide the procedure, whether this tier votes, and
+            // therefore whether a roll must be built. Computed up here because the
+            // skip gates below depend on it.
+            const layer = field('Layer', '\\d');
+            const tier = field('Tier', '[ABC]\\b');
+            /* §2: "Any member may propose with `[EMERGENCY]`." The tag in the title
+               is the marker the Constitution names — label-proposals.yml reads it
+               the same way — and while it is there it decides the procedure,
+               whatever Tier or Layer the body states. An Emergency resolution
+               votes, needs no endorsement, and runs twelve hours from opening, so
+               its roll is built the moment it opens: #45, the first, had none, and
+               the vote form refused every position until one was written by hand. */
+            const emergency = /\[EMERGENCY\]/i.test(pr.title || '');
+            const procedure = emergency ? 'Emergency'
+              : tier ? `Tier ${tier.toUpperCase()}`
+              : layer === '3' ? 'Layer 3 Policy'
+              : layer === '4' ? 'Layer 4 Constitutional'
+              : null;
+            const votingKey = emergency ? 'emergency'
+              : layer === '4' ? 'layer-4'
+              : layer === '3' ? 'layer-3'
+              : (tier && tier.toUpperCase() === 'C') ? 'tier-c' : null;
+            const ready = !pr.draft;
+            const votingReady = !!votingKey && ready;
+
+            /* The section, from the description. The heading is matched anchored
+               and the section ends at the next heading of the same level or
+               below, or at a horizontal rule — the pull request template puts
+               one between this section and the next. */
+            const stripComments = s => s.replace(/<!--[\s\S]*?-->/g, '');
+            /* `(?![\s\S])` and not `\Z`. JavaScript has no \Z — it is a literal
+               "Z" — so the section terminated at the next heading, the next
+               horizontal rule, or the next capital Z in the prose, and a
+               description whose amendment record is the LAST thing in it matched
+               nothing at all. Every test fixture happened to carry a `## Process`
+               heading after the section, so all of them passed; the first real
+               description written against this template did not. */
+            const secMatch = body.match(/^##[^\S\n]+Amendment record[^\n]*$([\s\S]*?)(?=^##[^\S\n]|^---[^\n]*$|(?![\s\S]))/m);
+            // A record is generated for anything with a procedure — Status and
+            // Assumptions default, so a proposal filed with a blank (or absent) §1
+            // section still yields a compliant record. No procedure means it is not
+            // a proposal this workflow records; the proposal itself is unaffected,
+            // since the tooling records and never gates.
+            if (!procedure) {
+              return skip('no **Layer:** or **Tier:** this workflow can turn into a procedure, so ' +
+                'there is nothing here to record.');
+            }
+
+            /* Read each field out of the section rather than copying the section
+               wholesale: the template's guidance comments live in there, and a
+               file is not a record of a decision because it quotes a template.
+               Bullets are tolerated and stripped — the template used to emit
+               them, and a description written against the old one still works. */
+            const secText = secMatch ? stripComments(secMatch[1]) : '';
+            const answers = {};
+            for (const f of FIELDS) {
+              const m = secText.match(new RegExp(
+                `^${H}(?:[-*+]${H})?\\*\\*${f}:\\*\\*${H}(.*(?:\\n(?!${H}(?:[-*+]${H})?\\*\\*|${H}$).*)*)`, 'im'));
+              const v = m ? m[1].replace(/\s+/g, ' ').trim() : '';
+              /* A field still carrying the template's <angle-bracket> placeholder
+                 is not an answer, and neither is one left blank. */
+              if (v && !/^</.test(v)) answers[f] = v;
+            }
+
+            /* ---- the block this workflow owns -------------------------------
+               Paired anchors, so the region is unambiguous and does not depend
+               on a lookahead to the next heading. check-record.py strips HTML
+               comments before matching, so the anchors are invisible to it. */
+            const OPEN = '<!-- amendment-record: copied from the pull request description -->';
+            const CLOSE = '<!-- /amendment-record -->';
+            /* §1 asks every amendment to record how it was made, its assumptions and
+               its status. Two the proposer need not type: Status is `live` (or
+               `experimental` for an exp- instrument), and Assumptions defaults to
+               `None` — a truthful record that the rule rests on no special
+               assumption, which the proposer overrides by editing the one template
+               field. "How it was made" is only knowable once the vote closes, so it
+               is left for the Record Keeper to add then (tally.py prints the line).
+               Notes and abstentions are §1-conditional ("Any ..."), copied if given. */
+            const isExp = /\*\*File\(s\):\*\*[^\n]*\bexp-/i.test(body);
+            const gen = { 'Assumptions': 'None', 'Status': isExp ? 'experimental' : 'live' };
+            const val = f => answers[f] || gen[f] || null;
+            const block = [OPEN,
+              ...FIELDS.filter(f => val(f)).map(f => `**${f}:** ${val(f)}`),
+              CLOSE].join('\n');
+
+            const safeTitle = String(pr.title || '').replace(/[\r\n]/g, ' ').slice(0, 200);
+
+            /* ---- build the vote roll for a voting tier, server-side -----------
+               A member's position needs a table to go in. Rather than a human
+               opening the vote in the browser (and pasting a wall of text when a
+               record file already exists), the roll is built here, once, when the
+               proposal is open. record-vote.yml is UNTOUCHED: a voter still finds
+               their row and writes a position. The arithmetic and layout are
+               ported verbatim from docs/record.js voteFileFor, which is tested, so
+               the two cannot disagree about the threshold. */
+            function requiredFor(spec, d) {
+              if (!spec) return null;
+              if (spec.rule === 'majority') return Math.floor(d / 2) + 1;
+              if (spec.rule === 'fraction') return Math.ceil(d * spec.num / spec.den);
+              return null;
+            }
+            function ukStamp(d) {
+              const part = o => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', ...o }).format(d);
+              const tz = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', timeZoneName: 'longOffset' })
+                .formatToParts(d).find(p => p.type === 'timeZoneName').value;
+              const off = tz === 'GMT' ? '+00:00' : tz.replace('GMT', '');
+              const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit',
+                day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(d)
+                .reduce((o, x) => (o[x.type] = x.value, o), {});
+              const words = `${part({ weekday: 'long' })} ${+p.day} ${part({ month: 'long' })} ${p.year}, ${p.hour}:${p.minute} UK`;
+              return `${words} (\`${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:00${off}\`)`;
+            }
+
+            /* The opened: timestamp a frozen roll needs. label-proposals stamps it
+               on, but as GITHUB_TOKEN — and a bot's label-add does not re-trigger this
+               workflow, so on the opening event the payload carries no label yet.
+               Rather than wait for a trigger that never comes, derive it here the same
+               way label-proposals does: prefer its label when present (a later edit),
+               otherwise the ready_for_review timeline event, otherwise created_at.
+               Computed identically, so the two cannot disagree. */
+            let voteScaffold = null;
+            if (votingReady) {
+              let members, mSha, cfg;
+              try {
+                const r = await github.rest.repos.getContent({ owner, repo, path: 'members.md', ref: DEFAULT_BRANCH });
+                members = Buffer.from(r.data.content, 'base64').toString('utf8');
+                mSha = r.data.sha;
+                const d2 = await github.rest.repos.getContent({ owner, repo, path: 'docs/data.json', ref: DEFAULT_BRANCH });
+                cfg = JSON.parse(Buffer.from(d2.data.content, 'base64').toString('utf8'));
+              } catch (e) {
+                return skip(`could not read members.md or docs/data.json to build the roll: ${e.message}. ` +
+                  `A later edit will try again.`);
+              }
+              const spec = (cfg.thresholds || {})[votingKey];
+              const proc = (cfg.procedures || {})[votingKey] || {};
+              const days = proc.days;
+              const needs = proc.needsApprovals || 0;
+              /* Fail CLOSED, not open: Layer 3 and Layer 4 are endorsement-gated by
+                 the Constitution, so if data.json carries no requirement for them the
+                 bug is a missing requirement — never a licence to open the vote with
+                 no endorsements. (An ungated tier legitimately has needs === 0.) */
+              if ((votingKey === 'layer-3' || votingKey === 'layer-4') && needs < 1) {
+                return skip(`#${n} is ${votingKey}, which the Constitution gates on endorsements, but ` +
+                  `data.json sets none for it. Refusing to open the vote ungated — fix needsApprovals in data.json.`);
+              }
+
+              /* When the clock starts. For a tier that needs endorsements — Layer 4's
+                 two reviews, Section 2 — the deliberation clock starts AT the Nth
+                 endorsement, not when the proposal became ready; so the roll is not
+                 built, and its window not dated, until that many standing approvals
+                 exist. Reviews are read here directly, not from a label another
+                 workflow writes, so this does not hang on a bot event that would never
+                 re-trigger. For an ungated tier the moment is when it opened: the
+                 opened: label if present, else the ready_for_review timeline event,
+                 else created_at — computed as label-proposals does, so the two agree. */
+              let opened;
+              if (needs > 0) {
+                /* Endorsements are counted from the unforgeable endorse-ISSUE trail,
+                   never from the endorsed: label — a label is writable by hand and
+                   this is a constitutional gate. GitHub stamps each issue's author,
+                   so an endorsement cannot be faked as another member. record-
+                   endorsement.yml counts identically for its cache labels. */
+                let issues;
+                try {
+                  issues = await github.paginate(github.rest.issues.listForRepo,
+                    { owner, repo, state: 'all', per_page: 100 });
+                } catch (e) {
+                  return skip(`could not read the endorsements on #${n}: ${e.message}. A later event will try again.`);
+                }
+                const section0 = (members.split(/^##\s+/m).find(x => /^Current members/i.test(x)) || '');
+                const roster = section0.split('\n')
+                  .filter(l => /^\|/.test(l) && !/^\|\s*:?-/.test(l)).slice(1)
+                  .map(l => l.replace(/^\||\|$/g, '').split('|').map(c => c.trim()))
+                  .filter(c => c[0])
+                  .map(c => ({ login: (c[1] || '').toLowerCase(), id: c[2] || '' }));
+                const prField = b => {
+                  for (const chunk of String(b || '').split(/^### /m).slice(1)) {
+                    const nl = chunk.indexOf('\n'); if (nl < 0) continue;
+                    if (chunk.slice(0, nl).trim() === 'Pull request number') {
+                      const mx = chunk.slice(nl).trim().match(/^#?(\d{1,6})$/);
+                      return mx ? Number(mx[1]) : null;
+                    }
+                  }
+                  return null;
+                };
+                const isEndorseIssue = it => !it.pull_request &&
+                  ((it.labels || []).some(l => (l && l.name || l) === 'endorse') || /^Endorse:\s*PR\s*#/i.test(it.title || ''));
+                const proposerId = String(pr.user && pr.user.id);
+                /* An endorse-issue's body is editable by anyone with write (all members
+                   push branches, so all have it), and the "Pull request number" binding
+                   is read from that body. So an edited endorse-issue is untrusted: a
+                   member could retarget another's endorsement onto this PR by editing it.
+                   GitHub records a body/title edit as lastEditedAt; a form-opened, never-
+                   touched endorsement has none. Fail CLOSED (do not count) if the edit
+                   state cannot be read — a later event re-counts. */
+                const edited = async num => {
+                  try {
+                    const q = await github.graphql(
+                      `query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){lastEditedAt}}}`,
+                      { o: owner, r: repo, n: num });
+                    return !!(q && q.repository && q.repository.issue && q.repository.issue.lastEditedAt);
+                  } catch (e) { core.warning(`could not read edit state of #${num}; not counting it: ${e.message}`); return true; }
+                };
+                const endorsers = new Map();   // member id -> earliest endorsement time
+                for (const it of issues) {
+                  if (!isEndorseIssue(it)) continue;
+                  if (prField(it.body) !== n) continue;
+                  const aid = String(it.user && it.user.id);
+                  const mem = roster.find(m => m.id && m.id === aid);   // id-verified members only
+                  if (!mem || mem.id === proposerId) continue;          // non-member or the proposer never counts
+                  if (await edited(it.number)) continue;                // an edited endorse-issue is untrusted
+                  const at = it.created_at;
+                  if (!endorsers.has(mem.id) || new Date(at) < new Date(endorsers.get(mem.id))) endorsers.set(mem.id, at);
+                }
+                const approvedAt = [...endorsers.values()].filter(Boolean).sort();
+                if (approvedAt.length < needs) {
+                  return skip(`#${n} is a ${spec ? spec.name : votingKey} proposal with ${approvedAt.length} ` +
+                    `of ${needs} endorsements. Section 2 starts the clock at ${needs}, so the roll ` +
+                    `is built — and its window dated — only once ${needs} are in place.`);
+                }
+                opened = new Date(approvedAt[needs - 1]);   // the Nth endorsement started the clock
+              } else {
+                const openedLabel = (pr.labels || []).map(l => (l && l.name) || l).find(x => /^opened:/.test(String(x)));
+                let openedIso;
+                if (openedLabel) {
+                  openedIso = String(openedLabel).slice(String(openedLabel).indexOf(':') + 1);
+                } else {
+                  openedIso = pr.created_at;
+                  try {
+                    const tl = await github.paginate(github.rest.issues.listEventsForTimeline,
+                      { owner, repo, issue_number: n });
+                    const ready = tl.filter(e => e.event === 'ready_for_review').pop();
+                    if (ready) openedIso = ready.created_at;
+                  } catch (e) { /* fall back to created_at — the roll still builds */ }
+                  openedIso = String(openedIso).replace(/\.\d+Z$/, 'Z');
+                }
+                opened = new Date(openedIso);
+              }
+
+              const section = (members.split(/^##\s+/m).find(x => /^Current members/i.test(x)) || '');
+              const names = section.split('\n')
+                .filter(l => /^\|/.test(l) && !/^\|\s*:?-/.test(l)).slice(1)
+                .map(l => l.replace(/^\||\|$/g, '').split('|')[0].trim())
+                .filter(Boolean);
+              if (!spec || !names.length || isNaN(opened) || !days) {
+                return skip(`could not assemble the roll for #${n} (threshold, members or period missing). ` +
+                  `A later edit will try again.`);
+              }
+              const closes = new Date(opened.getTime() + days * 86400000);
+              /* Word for word docs/record.js carriesLine(), which
+                 test-record-amendment.mjs holds this to. An Emergency resolution's
+                 majority is "of those who vote", which §2 defines for Tier C only
+                 (data.json: over "ambiguous"), so no pass mark is written — a
+                 number here would be read as the bar, and the generic branch used
+                 to print a majority of ALL members. Only the quorum is stated. */
+              const d = names.length;
+              const carries = spec.over === 'voting'
+                ? `${spec.words} — quorum **${requiredFor(spec.quorum, d)} of ${d}**; the majority is counted over preference and objection only, once the window has closed`
+                : spec.over === 'ambiguous'
+                ? `${spec.words} — quorum **${requiredFor(spec.quorum, d)} of ${d}**; §2 defines "those who vote" for Tier C only, so the majority is counted under both readings once the window has closed`
+                : `${spec.words} — **${requiredFor(spec, d)} of ${d}**`;
+              voteScaffold = [
+                `# Amendment record — PR #${n}: ${safeTitle}`, '',
+                `**Procedure:** ${spec.name}`,
+                `**Carries if:** ${carries}`,
+                `**Opened:** ${ukStamp(opened)}`,
+                `**Closes:** ${ukStamp(closes)}`,
+                `**Entitled to vote:** ${names.length} members, frozen when the roll was built — \`members.md\` blob \`${(mSha || '').slice(0, 7)}\``,
+                '',
+                '| Member | Position | Date |', '|---|---|---|',
+                ...names.map(nm => `| ${nm} | — | |`), '',
+                '**Positions:** `preference` · `toleration` · `abstention` · `objection` · `—` not answered.', '',
+                '> **Only `preference` counts as affirmative support.** Where a procedure needs',
+                '> affirmative support from a fraction of all members — Layer 3, Layer 4 and',
+                '> re-ratification all do — toleration, abstention and never answering are the',
+                '> same number. None of them is a yes.', '',
+                '## Amendment record', '', block, '',
+                '## Result', '',
+                '*Written when the window closes, with the arithmetic shown. `python3 .github/scripts/tally.py` recomputes it and prints the working.*', '',
+                '## Objections', '',
+                "*Each objection's reason and route forward, in full. Section 2 requires both.*", '',
+              ].join('\n');
+            }
+
+            const comment = async m => {
+              try { await github.rest.issues.createComment({ owner, repo, issue_number: n, body: m }); }
+              catch (e) { core.warning(`could not comment: ${e.message}`); }
+            };
+
+            /* ---- the write --------------------------------------------------
+               The read is the FIRST statement of the loop and the only continue
+               is in the catch, so no computed value survives an attempt. The
+               intuitive version — refetch the sha and resend the content —
+               erases whoever wrote in between. */
+            for (let attempt = 1; attempt <= 5; attempt++) {
+              let got;
+              try {
+                const r = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
+                got = { text: Buffer.from(r.data.content, 'base64').toString('utf8'), sha: r.data.sha };
+              } catch (e) {
+                if (e.status !== 404) {
+                  core.setFailed(`Could not read ${path} on ${branch}: ${e.status} ${e.message}. ` +
+                    `Nothing has been written.`);
+                  return;
+                }
+                got = { text: null, sha: undefined };
+              }
+
+              let next;
+              let upgraded = false;
+              if (got.text === null) {
+                /* A voting proposal that can build its roll gets the full vote file.
+                   One that cannot yet — a draft, or short of its endorsements — gets
+                   NO file: a voting proposal's record IS the vote file, written when
+                   the roll is buildable, on the event that makes it so. Anything non-
+                   voting gets the §1-record file. A proposal with no procedure is not
+                   created at all — a file without a Procedure: line disables check-record. */
+                if (voteScaffold !== null) {
+                  next = voteScaffold;
+                } else if (votingKey) {
+                  return skip(`#${n} is a voting proposal whose roll cannot be built yet (not open, ` +
+                    `or short of its endorsements), so no record file is created now — the vote file ` +
+                    `is written when the roll becomes buildable.`);
+                } else {
+                    next = [`# Amendment record — PR #${n}: ${safeTitle}`, '',
+                    `**Procedure:** ${procedure}`, '',
+                    '## Amendment record', '', block, ''].join('\n');
+                }
+              } else if (voteScaffold !== null && !/^\|\s*Member\s*\|/m.test(got.text)) {
+                /* Upgrade: a voting proposal whose file was created before its roll
+                   could be built (filed at a non-voting tier, then edited to a voting
+                   one) becomes the full vote file now. Safe — a file with no roll table
+                   holds no recorded position to lose. A file that already has a roll
+                   falls to the normal §1-block update below, which never touches it. */
+                upgraded = true;
+                next = voteScaffold;
+              } else {
+                const base = got.text;
+                const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const region = new RegExp(esc(OPEN) + '[\\s\\S]*?' + esc(CLOSE));
+                if (region.test(base)) {
+                  /* Function replacements, never string ones. A replacement
+                     STRING expands $&, $`, $' and $1, and `block` carries the
+                     author's own prose. record-vote.yml has the scar: an
+                     objection reading "the space costs $`40 a month" wrote the
+                     whole file prefix into the middle of itself. */
+                  next = base.replace(region, () => block);
+                } else if (base.includes(OPEN) || base.includes(CLOSE)) {
+                  await comment(`I was going to copy the **Amendment record** from this ` +
+                    `description into \`${path}\`, and stopped. The file has one of my anchor ` +
+                    `comments but not the matching other one, so I cannot tell which part is ` +
+                    `mine to replace.\n\n**Nothing has been written.** Either repair the pair, ` +
+                    `or delete both and the section will be rebuilt on the next edit.`);
+                  core.setFailed(`${path} has an unpaired anchor.`);
+                  return;
+                } else {
+                  const hre = /^##[^\S\n]+Amendment record[^\n]*$/m;
+                  const hit = base.match(hre);
+                  if (!hit) {
+                    return skip(`${path} exists but has no \`## Amendment record\` heading, so there ` +
+                      `is nowhere this belongs. Left alone.`);
+                  }
+                  /* The section exists and was written by hand. Overwriting it
+                     is the one thing not to do: that is somebody's work, and the
+                     cost of refusing is only that they keep editing by hand. */
+                  const after = base.slice(hit.index + hit[0].length);
+                  const sectionBody = stripComments(after.split(/^##[^\S\n]/m)[0]).trim();
+                  if (sectionBody) {
+                    return skip(`${path} already has an \`## Amendment record\` written by hand. ` +
+                      `Left alone — this never overwrites what somebody wrote.`);
+                  }
+                  next = base.replace(hre, h => h + '\n\n' + block);
+                }
+              }
+              next = next.replace(/\s*$/, '\n');
+
+              /* ---- invariants, checked against THESE bytes on every attempt --
+                 Failing closed is right. The cost of refusing is that somebody
+                 edits a file the rule already says is hand-editable. The cost of
+                 writing through a failed check is a vote row destroyed, or a
+                 voter told their position was not recorded because this writer
+                 moved something their invariants police. */
+              const bad = (() => {
+                const before = got.text || '';
+                const tables = s => (s.match(/^\|.*\|[^\S\n]*$/gm) || []).length;
+                if (got.text !== null && !upgraded && tables(next) !== tables(before)) {
+                  return 'the number of table rows changed';
+                }
+                for (const h of ['**Procedure:**', '**Carries if:**', '**Opened:**',
+                                 '**Closes:**', '**Entitled to vote:**']) {
+                  const first = s => (s.split('\n').find(l => l.startsWith(h)) || null);
+                  if (got.text !== null && !upgraded && first(before) !== first(next)) {
+                    return `the ${h} line changed, and this workflow never writes one into an existing file`;
+                  }
+                }
+                const strip = s => s.replace(new RegExp(
+                  OPEN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\s\\S]*?' +
+                  CLOSE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '');
+                if (got.text !== null && !upgraded && strip(next).replace(/\n{2,}/g, '\n\n').trim()
+                                      !== strip(before).replace(/\n{2,}/g, '\n\n').trim()) {
+                  return 'something outside the amendment record region changed';
+                }
+                if (/[\x00-\x09\x0B-\x1F\x7F]/.test(next)) {
+                  return 'the result contains a control character';
+                }
+                if (next.length > (got.text || '').length + 65536) {
+                  return 'the result grew by more than 64KB';
+                }
+                return null;
+              })();
+              if (bad) {
+                await comment(`I built a new version of \`${path}\` and then refused to write it, ` +
+                  `because it failed an internal check: **${bad}**.\n\n**Nothing in the file has ` +
+                  `changed.** That is intended: writing anyway could destroy a recorded position, ` +
+                  `and a position quietly destroyed may never be noticed.`);
+                core.setFailed(`refused to write ${path}: ${bad}`);
+                return;
+              }
+
+              if (got.text !== null && next === got.text) {
+                return skip('the file already says exactly this; nothing to change.');
+              }
+
+              try {
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner, repo, path, branch, sha: got.sha,
+                  content: Buffer.from(next, 'utf8').toString('base64'),
+                  message: `Record the amendment record for PR #${n}\n\n` +
+                    `Copied from the pull request description by ` +
+                    `.github/workflows/record-amendment.yml. The five fields are the ` +
+                    `author's words; this commit only writes them where \`git clone\` ` +
+                    `will retrieve them.\n\n` +
+                    `Co-Authored-By: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>`,
+                  author: {
+                    name: pr.user.login,
+                    email: `${pr.user.id}+${pr.user.login}@users.noreply.github.com`,
+                  },
+                });
+                core.notice(`wrote ${path} on ${branch}.`);
+                return;
+              } catch (e) {
+                /* On a CREATE, any 422 is stale: GitHub answers 422 when the
+                   file already exists, which is exactly what happens when
+                   another writer created it between our 404 and our write. On an
+                   UPDATE the message is checked, so a genuine validation error
+                   is not retried five times. record-vote.yml:729 draws the same
+                   line for the same reason. */
+                const stale = e.status === 409 ||
+                  (e.status === 422 && (got.text === null ||
+                    /sha|does not match|expected|exists/i.test(e.message || '')));
+                if (!stale) {
+                  core.setFailed(`Could not write ${path}: ${e.status} ${e.message}`);
+                  return;
+                }
+                core.notice(`attempt ${attempt}: ${path} changed under us (${e.status}); re-reading`);
+                await sleep(400 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400));
+              }
+            }
+            await comment(`Five attempts to write \`${path}\` were each overtaken by somebody else ` +
+              `writing to it first, so the **Amendment record** in this description has not been ` +
+              `copied across. Nothing has been lost — edit the description again, or copy the ` +
+              `section into the file by hand.`);
+            core.setFailed(`five write conflicts on ${path}`);

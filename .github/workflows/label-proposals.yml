@@ -1,8 +1,12 @@
 # Turns what a proposer wrote into labels the Record dashboard reads, and records
-# two facts the Constitution cares about:
+# when an ungated proposal was submitted for deliberation:
 #
-#   opened:<timestamp>   when the proposal was submitted for deliberation
-#   endorsed:<n>         how many members have endorsed it
+#   opened:<timestamp>   when an UNGATED proposal (Tier A/B/C, or Emergency) left draft
+#   emergency            the title carries §2's [EMERGENCY] tag; replaces tier-*/days-*
+#
+# An endorsement-gated tier (Layer 3/4) has its opened: and endorsed:<n> labels
+# written by record-endorsement.yml instead — its clock starts at the Nth
+# endorsement, not when it leaves draft — so this workflow never stamps one.
 #
 # The opened: label is not a convenience: it is visible on the proposal itself,
 # with GitHub's own record of who added it and when, which is what showing that
@@ -19,8 +23,6 @@ name: Label proposals
 on:
   pull_request_target:
     types: [opened, edited, reopened, ready_for_review, converted_to_draft]
-  pull_request_review:
-    types: [submitted, dismissed, edited]
 
 permissions:
   pull-requests: write
@@ -49,31 +51,60 @@ jobs:
               .catch(() => {});
 
             const current = await names();
-            const managed = /^(layer-\d|tier-[abc]|days-\d+|opened:|endorsed:)/;
+            const managed = /^(layer-\d|tier-[abc]|days-\d+|emergency$|opened:|endorsed:)/;
 
-            // ---- endorsements -------------------------------------------------
-            // "Two endorsing reviews start the 7-day deliberation clock" (§2).
-            // An endorsing review is read as an approving review. Only a member's
-            // most recent review counts, so a dismissal or a change of mind is
-            // reflected rather than accumulated.
-            if (context.eventName === 'pull_request_review') {
-              const rv = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: n });
-              const latest = new Map();
-              for (const r of rv) if (r.state !== 'COMMENTED') latest.set(r.user.login, r.state);
-              const count = [...latest.values()].filter(s => s === 'APPROVED').length;
-              for (const name of current.filter(x => x.startsWith('endorsed:'))) {
-                if (name !== `endorsed:${count}`) await drop(name);
-              }
-              if (!current.includes(`endorsed:${count}`)) await add(`endorsed:${count}`);
-              return;
+            // ---- layer, tier, period, from what the proposer wrote -------------
+            /* HTML comments are stripped FIRST. They are not stripped from a
+               pull request body by GitHub — only hidden when it renders one —
+               and this template puts its guidance inline, beside each field. A
+               proposer who wrote "**Layer:** <!-- write just the number --> 3",
+               exactly as the template invited, got "I could not read a Layer":
+               the parser reached "<" where it wanted a digit and gave up. Every
+               other reader in this repository already strips them;
+               record-vote.yml in two places, objection-check.yml in one,
+               check-record.py in two. This was the only one that did not. */
+            const body = (pr.body || '').replace(/<!--[\s\S]*?-->/g, '');
+            const H = '[^\\S\\n]*';
+            const field = (label, capture) =>
+              (body.match(new RegExp(`^${H}\\*\\*${label}:\\*\\*${H}\\**${H}(${capture})`, 'im')) || [])[1];
+            const layer = field('Layer', '\\d');
+            const tier  = field('Tier', '[ABC]\\b');
+            const days  = field('Deliberation period', '\\d+');
+
+            /* §2: "Any member may propose with `[EMERGENCY]`." The tag is the marker
+               the Constitution names, so it is read from the title and nowhere else.
+               An Emergency resolution runs its own procedure — twelve hours from
+               opening, no tier, no stated period, no endorsement — so while the tag
+               is there it decides the procedure and Tier and period are not
+               labelled. The Layer still is: it is what the bans below turn on, and
+               what confirming the resolution afterwards will need. */
+            const emergency = /\[EMERGENCY\]/i.test(pr.title || '');
+            const saysEmergencyTier = !!field('Tier', 'emergency\\b');
+
+            // How many endorsing reviews this proposal needs before its clock starts,
+            // read from data.json — the one source the dashboard and record-amendment
+            // also read, so the count cannot drift between a label, a page and a file.
+            const key = emergency ? 'emergency'
+              : tier ? `tier-${tier.toLowerCase()}`
+              : layer === '3' ? 'layer-3' : layer === '4' ? 'layer-4' : null;
+            let needs = 0;
+            if (key) {
+              try {
+                const dref = (context.payload.repository && context.payload.repository.default_branch) || 'main';
+                const d = await github.rest.repos.getContent({ owner, repo, path: 'docs/data.json', ref: dref });
+                const cfg = JSON.parse(Buffer.from(d.data.content, 'base64').toString('utf8'));
+                needs = ((cfg.procedures || {})[key] || {}).needsApprovals || 0;
+              } catch (e) { core.warning(`could not read data.json for needsApprovals: ${e.message}`); }
             }
 
             // ---- opening ------------------------------------------------------
-            // A proposal is open for deliberation when it is not a draft.
-            // Converting back to draft withdraws it, so the clock stops.
+            // Converting back to draft withdraws the proposal, so the clock stops.
+            // An ungated tier's clock starts when it leaves draft; a gated tier's
+            // starts at its Nth endorsement, and record-endorsement.yml stamps
+            // opened: then — so this never stamps one for a gated tier.
             if (action === 'converted_to_draft' || pr.draft) {
               for (const name of current.filter(x => x.startsWith('opened:'))) await drop(name);
-            } else if (!current.some(x => x.startsWith('opened:'))) {
+            } else if (needs === 0 && !current.some(x => x.startsWith('opened:'))) {
               // Prefer GitHub's own record of the moment it left draft, so the
               // label can be checked against the timeline rather than trusted.
               let at = pr.created_at;
@@ -86,34 +117,84 @@ jobs:
               await add(`opened:${at.replace(/\.\d+Z$/, 'Z')}`);
             }
 
-            // ---- layer, tier, period, from what the proposer wrote -------------
-            const body = pr.body || '';
-            // Anchored to one line, and \s would span newlines: a field left blank
-            // followed by prose that happens to start with a digit would otherwise
-            // be read as the answer. "**Layer:**" above "2 Ordinary · 3 Policy" is
-            // the template's own wording, and it labelled that proposal layer-2.
-            const H = '[^\\S\\n]*';
-            const field = (label, capture) =>
-              (body.match(new RegExp(`^${H}\\*\\*${label}:\\*\\*${H}\\**${H}(${capture})`, 'im')) || [])[1];
-            const layer = field('Layer', '\\d');
-            const tier  = field('Tier', '[ABC]\\b');
-            const days  = field('Deliberation period', '\\d+');
-
+            // ---- apply the layer / tier / period labels ----------------------
             const wanted = new Set();
             if (layer) wanted.add(`layer-${layer}`);
-            if (tier)  wanted.add(`tier-${tier.toLowerCase()}`);
-            if (days)  wanted.add(`days-${days}`);
+            if (emergency) wanted.add('emergency');
+            else {
+              if (tier) wanted.add(`tier-${tier.toLowerCase()}`);
+              if (days) wanted.add(`days-${days}`);
+            }
 
-            for (const name of current.filter(x => /^(layer-\d|tier-[abc]|days-\d+)$/.test(x))) {
+            for (const name of current.filter(x => /^(layer-\d|tier-[abc]|days-\d+|emergency)$/.test(x))) {
               if (!wanted.has(name)) await drop(name);
             }
             for (const name of wanted) if (!current.includes(name)) await add(name);
 
+            let comments = null;
+            const commentWith = async marker => {
+              if (!comments) comments = (await github.rest.issues.listComments(
+                { owner, repo, issue_number: n, per_page: 100 })).data;
+              return comments.find(c => (c.body || '').includes(marker)) || null;
+            };
+
+            // ---- an Emergency resolution: what §2 forbids it, said once ------
+            /* §2 limits what an Emergency resolution may decide. Most of the list
+               is a judgement about effect that no workflow can make, so all of it
+               is quoted; the parts a file list CAN show are named. Kept current
+               rather than posted once, because a proposal's files can change after
+               it opens — but it never blocks anything, as the missing-Layer note
+               below does not. */
+            if (emergency) {
+              const marker = '<!-- label-proposals:emergency -->';
+              let files = [];
+              try {
+                files = (await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: n }))
+                  .map(f => f.filename);
+              } catch (e) { core.warning(`could not list the files in #${n}: ${e.message}`); }
+              const flags = [];
+              if (layer === '4' || files.includes('constitution.md'))
+                flags.push('It ' + (files.includes('constitution.md') ? 'changes `constitution.md`' : 'is filed at Layer 4') +
+                  ', and an Emergency resolution *may not amend this Constitution*.');
+              if (files.includes('members.md'))
+                flags.push('It changes `members.md`, and an Emergency resolution *may not decide membership*.');
+              if (files.some(f => f.startsWith('disputes/')))
+                flags.push('It changes a file under `disputes/`, and an Emergency resolution *may not determine an adjudication*.');
+              const text = [
+                marker,
+                "This is filed as an **Emergency resolution** (§2), so it runs for **12 hours from when it was opened**, and if it carries it *expires after 7 days unless confirmed through the normal process applicable to its substance*.",
+                "",
+                ...(flags.length ? ["**From the files in this pull request:**", "", ...flags.map(f => `- ${f}`), ""] : []),
+                "§2 also says, in its own words:",
+                "",
+                "> An Emergency resolution may not amend this Constitution, impose a sanction, decide membership, determine an adjudication, authorise expenditure above £300, create an ongoing financial commitment, or decide a matter otherwise requiring Constitutional approval. The same Emergency resolution may not be renewed through the Emergency procedure.",
+                "",
+                "Whether this proposal does any of those is a judgement about its effect, which no workflow can make. Nothing is blocked by this note."
+              ].join('\n');
+              const had = await commentWith(marker);
+              if (!had) await github.rest.issues.createComment({ owner, repo, issue_number: n, body: text }).catch(() => {});
+              else if (had.body !== text)
+                await github.rest.issues.updateComment({ owner, repo, comment_id: had.id, body: text }).catch(() => {});
+            } else if (saysEmergencyTier) {
+              /* "**Tier:** Emergency" with no tag. §2 makes a proposal an Emergency
+                 resolution by the tag, so this is not labelled as one — and saying
+                 why costs one comment, where silence would cost a 12-hour window. */
+              const marker = '<!-- label-proposals:emergency-tag -->';
+              if (!(await commentWith(marker))) await github.rest.issues.createComment({
+                owner, repo, issue_number: n,
+                body: [
+                  marker,
+                  "This says **Tier:** Emergency, but §2 makes a proposal an Emergency resolution by its tag: *\"Any member may propose with `[EMERGENCY]`.\"* The title has no `[EMERGENCY]`, so it has not been labelled as one and no 12-hour window is shown.",
+                  "",
+                  "If it is meant as one, start the title with `[EMERGENCY]` and leave **Tier** blank. Editing the title re-runs this."
+                ].join('\n')
+              }).catch(() => {});
+            }
+
             // ---- say something only when the layer is missing, and only once ---
             if (layer) return;
             const marker = '<!-- label-proposals -->';
-            const comments = await github.rest.issues.listComments({ owner, repo, issue_number: n, per_page: 100 });
-            if (comments.data.some(c => (c.body || '').includes(marker))) return;
+            if (await commentWith(marker)) return;
 
             await github.rest.issues.createComment({
               owner, repo, issue_number: n,
