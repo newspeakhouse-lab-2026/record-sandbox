@@ -41,3 +41,5 @@ Nobody proposed for removal.
 - 2026-10-06 — Added `GitHub` and `ID` columns. No membership change.
 - 2026-10-25 — Recorded GitHub accounts for Nathaniel Cooke and Rhianwen Rowlands, each confirmed by the member. No membership change.
 - 2026-11-01 — Updated the `Role Held` column to reflect the §3.2 elections (holders elected 1 November 2026, each unopposed). No membership change.
+
+- sandbox fixture line
