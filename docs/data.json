@@ -42,7 +42,7 @@
     },
     "emergency": {
       "name": "Emergency",
-      "days": 0.003,
+      "days": 0.5,
       "source": "§2",
       "quote": "Requires a majority of those who vote within 12 hours, quorum of half."
     }
